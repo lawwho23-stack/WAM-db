@@ -280,6 +280,7 @@ OWNER_PASSWORD='your passphrase' node scripts/smoke.mjs
 - **Writes return fast, jobs run later.** An embed failure never fails a write; the job stays queued for the cron runner.
 - **Money in minor units, never floats.** Whole numbers of 1/100 in a `bigint`, converted once at write time. See the Money section for the rest.
 - **Finance writes are owner-only.** Agents get read tools and nothing else, so "the AI moved my money" is not a failure mode this app has.
+- **A page arrives with its data.** Money pages render on the server with their rows and dropdowns in parallel, and a save puts the row the write returned straight into the list. Every Neon query is a network round trip, so the number of round trips per click is the number to watch.
 
 ## Roadmap
 
