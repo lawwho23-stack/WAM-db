@@ -4,6 +4,8 @@ One database that every AI agent can read and write, plus a place for my own rea
 
 The name says the goal: **W**hole **A**gent **M**emory. Not per-chat memory, not per-tool memory — one shared memory layer that my coding agents, review bots and chat agents all reach through the same door.
 
+**Live:** https://wam-db.vercel.app — private, owner-only. Access is gated by Vercel Authentication, so only the owner account can open it.
+
 ---
 
 ## What this is
