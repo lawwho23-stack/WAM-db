@@ -168,7 +168,7 @@ export default async function MoneyPage({ searchParams }: { searchParams: Promis
                 <div className="border-b border-line px-4 py-3">
                   <h2 className="text-[13px] font-medium tracking-wide text-ink">Exchange rates</h2>
                 </div>
-                <RatesPanel />
+                <RatesPanel initialRates={s.rates} />
               </Panel>
             </div>
           </div>

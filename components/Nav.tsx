@@ -23,9 +23,35 @@ export default function Nav({ email }: { email?: string }) {
 
   useEffect(() => {
     let alive = true;
+
+    // The dot is the only consumer of this check, so a healthy result from the
+    // last minute is reused instead of pinging the database on every load.
+    const KEY = "health-ok-at";
+    const TTL = 60_000;
+    let seen = 0;
+    try {
+      seen = Number(sessionStorage.getItem(KEY)) || 0;
+    } catch {
+      // storage can be unavailable; just run the check
+    }
+    if (seen && Date.now() - seen < TTL) {
+      setHealthy(true);
+      return;
+    }
+
     fetch("/api/health")
       .then((r) => r.json())
-      .then((d) => alive && setHealthy(Boolean(d.db)))
+      .then((d) => {
+        if (!alive) return;
+        const ok = Boolean(d.db);
+        setHealthy(ok);
+        try {
+          if (ok) sessionStorage.setItem(KEY, String(Date.now()));
+          else sessionStorage.removeItem(KEY);
+        } catch {
+          // a failed write only costs one extra check later
+        }
+      })
       .catch(() => alive && setHealthy(false));
     return () => {
       alive = false;

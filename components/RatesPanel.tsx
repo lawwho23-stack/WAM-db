@@ -9,19 +9,28 @@ import { fmt, type Currency, type RateRow } from "@/lib/money-types";
  * in baht. They can be pulled from the feed or typed in by hand — the hand-typed
  * one wins, because sometimes you know the rate you actually got.
  */
-export default function RatesPanel({ compact = false }: { compact?: boolean }) {
-  const [rates, setRates] = useState<Record<string, RateRow | null> | null>(null);
+export default function RatesPanel({
+  compact = false,
+  initialRates,
+}: {
+  compact?: boolean;
+  /** The rates the page already read to draw its own numbers. Required, so no
+   *  caller can leave the panel fetching what the server just sent. */
+  initialRates: Record<string, RateRow | null> | null;
+}) {
+  const [rates, setRates] = useState<Record<string, RateRow | null> | null>(initialRates);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
-  async function load() {
-    try {
-      const body = await api<{ current: Record<string, RateRow | null> }>("/api/money/rates");
-      setRates(body.current);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not read the rates.");
-    }
+  /** Fold rows we just wrote into what is on screen — no read-back needed. */
+  function remember(written: RateRow[]) {
+    if (written.length === 0) return;
+    setRates((prev) => {
+      const next = { ...(prev ?? {}) };
+      for (const row of written) next[row.currency] = row;
+      return next;
+    });
   }
 
   async function refresh() {
@@ -32,7 +41,7 @@ export default function RatesPanel({ compact = false }: { compact?: boolean }) {
       const body = await api<{ updated: RateRow[] }>("/api/money/rates", { method: "POST", body: JSON.stringify({ refresh: true }) });
       const written = body.updated.map((r) => `${r.currency} ${r.rateToThb.toFixed(8)}`).join(" · ");
       setNote(written ? `Updated ${written}` : "The feed had nothing new.");
-      await load();
+      remember(body.updated);
     } catch (e) {
       setError(e instanceof Error ? e.message : "The feed could not be reached.");
     } finally {
@@ -46,18 +55,14 @@ export default function RatesPanel({ compact = false }: { compact?: boolean }) {
     setBusy(true);
     setError(null);
     try {
-      await api("/api/money/rates", { method: "POST", body: JSON.stringify({ currency, rate }) });
-      await load();
+      const saved = await api<{ rate: RateRow }>("/api/money/rates", { method: "POST", body: JSON.stringify({ currency, rate }) });
+      remember([saved.rate]);
       setNote(`${currency} set by hand.`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the rate.");
     } finally {
       setBusy(false);
     }
-  }
-
-  if (!rates && !error && !busy) {
-    void load();
   }
 
   const rows: { currency: Currency; label: string; hint: string }[] = [

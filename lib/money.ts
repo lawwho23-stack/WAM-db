@@ -32,27 +32,35 @@ async function workspaceId(): Promise<string> {
   return workspaceCache;
 }
 
+// The owner's actor row never changes either, and finding it was a round trip
+// per write. Remembered like the workspace id.
+let ownerActorCache: string | null = null;
+async function ownerActorId(): Promise<string> {
+  if (!ownerActorCache) ownerActorCache = await getActorByKind(await workspaceId(), "owner");
+  return ownerActorCache;
+}
+
 // ------------------------------------------------------------------ fx rates
 
 /**
  * The newest rate at or before `asOf` for each currency, falling back to the
  * newest rate we have at all. THB is always 1 — it is the base.
+ *
+ * One statement, because this sits on the critical path of every money page and
+ * each round trip to Postgres is real time. Sorting the preferred rows first
+ * lets DISTINCT ON pick them, so the fallback is the same query rather than a
+ * second pass.
  */
 export async function latestRates(asOf: string = todayISO()): Promise<Record<Currency, RateRow | null>> {
   const db = sql();
   const rows = await db`
     select distinct on (currency) currency, rate_to_thb, as_of::text as as_of, source
     from finance_fx_rates
-    where currency in ('USD', 'MMK') and as_of <= ${asOf}
-    order by currency, as_of desc`;
-  const fallback = await db`
-    select distinct on (currency) currency, rate_to_thb, as_of::text as as_of, source
-    from finance_fx_rates
     where currency in ('USD', 'MMK')
-    order by currency, as_of desc`;
+    order by currency, (as_of <= ${asOf}) desc, as_of desc`;
 
   const byCurrency = new Map<string, RateRow>();
-  for (const row of [...fallback, ...rows]) {
+  for (const row of rows) {
     byCurrency.set(row.currency, {
       currency: row.currency as Currency,
       rateToThb: num(row.rate_to_thb),
@@ -171,9 +179,21 @@ function mapAccount(row: AccountDbRow, rate: number): AccountRow {
   };
 }
 
-export async function accountsWithThb(asOf = todayISO()): Promise<AccountRow[]> {
-  const [accounts, rates] = await Promise.all([listAccounts(), latestRates(asOf)]);
+export async function accountsWithThb(asOf = todayISO(), options: { includeArchived?: boolean } = {}): Promise<AccountRow[]> {
+  const [accounts, rates] = await Promise.all([listAccounts(options), latestRates(asOf)]);
   return accounts.map((a) => ({ ...a, balanceThbMinor: Math.round(a.balanceMinor * (rates[a.currency]?.rateToThb ?? 0)) }));
+}
+
+/**
+ * The one rule a person can break on purpose: two accounts cannot share a name
+ * in the same workspace. Postgres says so in its own language; this says it in
+ * the one the page shows.
+ */
+function namedTwice(error: unknown, name: string): never {
+  if (error instanceof Error && error.message.includes("finance_accounts_name")) {
+    throw new Error(`There is already an account called "${name}". Rename it, or use the one that is there.`);
+  }
+  throw error;
 }
 
 export async function createAccount(input: {
@@ -184,13 +204,17 @@ export async function createAccount(input: {
   note?: string | null;
 }): Promise<AccountRow> {
   const db = sql();
-  const rows = await db`
-    insert into finance_accounts (workspace_id, name, kind, currency, opening_balance_minor, note)
-    values (${await workspaceId()}, ${input.name.trim()}, ${input.kind ?? "bank"}, ${input.currency},
-            ${input.openingBalanceMinor ?? 0}, ${input.note ?? null})
-    returning id, name, kind, currency, opening_balance_minor, note, archived_at::text as archived_at,
-              opening_balance_minor as balance_minor, 0 as tx_count`;
-  return mapAccount(rows[0] as AccountDbRow, 1);
+  try {
+    const rows = await db`
+      insert into finance_accounts (workspace_id, name, kind, currency, opening_balance_minor, note)
+      values (${await workspaceId()}, ${input.name.trim()}, ${input.kind ?? "bank"}, ${input.currency},
+              ${input.openingBalanceMinor ?? 0}, ${input.note ?? null})
+      returning id, name, kind, currency, opening_balance_minor, note, archived_at::text as archived_at,
+                opening_balance_minor as balance_minor, 0 as tx_count`;
+    return mapAccount(rows[0] as AccountDbRow, 1);
+  } catch (error) {
+    namedTwice(error, input.name.trim());
+  }
 }
 
 export async function updateAccount(
@@ -201,30 +225,35 @@ export async function updateAccount(
   // Written with db() rather than the tagged template: "leave the note
   // alone" and "set the note to null" are different requests, and the tagged
   // form would send one parameter doing both jobs.
-  const rows = await db(
-    `update finance_accounts set
-       name = coalesce($2, name),
-       kind = coalesce($3, kind),
-       opening_balance_minor = coalesce($4, opening_balance_minor),
-       note = case when $5 then $6 else note end,
-       archived_at = case when $7::boolean is null then archived_at
-                          when $7 then coalesce(archived_at, now())
-                          else null end,
-       updated_at = now()
-     where id = $1 and workspace_id = $8
-     returning id, name, kind, currency, opening_balance_minor, note, archived_at::text as archived_at,
-               opening_balance_minor as balance_minor, 0 as tx_count`,
-    [
-      id,
-      patch.name?.trim() ?? null,
-      patch.kind ?? null,
-      patch.openingBalanceMinor ?? null,
-      patch.note !== undefined,
-      patch.note ?? null,
-      patch.archived ?? null,
-      await workspaceId(),
-    ],
-  );
+  let rows: Record<string, unknown>[];
+  try {
+    rows = (await db(
+      `update finance_accounts set
+         name = coalesce($2, name),
+         kind = coalesce($3, kind),
+         opening_balance_minor = coalesce($4, opening_balance_minor),
+         note = case when $5 then $6 else note end,
+         archived_at = case when $7::boolean is null then archived_at
+                            when $7 then coalesce(archived_at, now())
+                            else null end,
+         updated_at = now()
+       where id = $1 and workspace_id = $8
+       returning id, name, kind, currency, opening_balance_minor, note, archived_at::text as archived_at,
+                 opening_balance_minor as balance_minor, 0 as tx_count`,
+      [
+        id,
+        patch.name?.trim() ?? null,
+        patch.kind ?? null,
+        patch.openingBalanceMinor ?? null,
+        patch.note !== undefined,
+        patch.note ?? null,
+        patch.archived ?? null,
+        await workspaceId(),
+      ],
+    )) as Record<string, unknown>[];
+  } catch (error) {
+    namedTwice(error, patch.name?.trim() ?? "that name");
+  }
   if (rows.length === 0) throw new Error("Account not found.");
   return mapAccount(rows[0] as AccountDbRow, 1);
 }
@@ -320,14 +349,19 @@ export async function updateCategory(id: string, patch: { name?: string; kind?: 
 
 // -------------------------------------------------------------- transactions
 
-const TX_SELECT = `
+// Split in two so a write can reuse the columns: `insert ... returning *` in a
+// CTE, then these columns joined to the account and category, means one round
+// trip where there used to be two (insert, then read it back).
+const TX_COLUMNS = `
   select t.id, t.occurred_on::text as occurred_on, t.account_id, a.name as account_name, a.currency as account_currency,
          t.category_id, c.name as category_name, c.kind as category_kind,
          t.amount_minor, t.currency, t.rate_to_thb, t.amount_thb_minor,
-         t.payee, t.note, t.tags, t.source, t.created_at
+         t.payee, t.note, t.tags, t.source, t.created_at`;
+const TX_FROM = `
   from finance_transactions t
   join finance_accounts a on a.id = t.account_id
   left join finance_categories c on c.id = t.category_id`;
+const TX_SELECT = `${TX_COLUMNS} ${TX_FROM}`;
 
 function mapTx(row: Record<string, unknown>): TxRow {
   return {
@@ -430,26 +464,71 @@ export async function createTransaction(input: TxInput): Promise<TxRow> {
   const db = sql();
   const workspace = await workspaceId();
 
-  const accountRows = await db`
-    select id, currency from finance_accounts where id = ${input.accountId} and workspace_id = ${workspace}`;
-  if (accountRows.length === 0) throw new Error("Account not found.");
-  const currency = (input.currency ?? (accountRows[0].currency as Currency)) as Currency;
+  // One statement answers the three things the write depends on: does the
+  // account exist and in which currency, what is that currency worth in baht on
+  // that day, and who is the owner. As separate awaits this was up to four round
+  // trips, and the person at the keyboard waits for the sum of them.
+  const [lookup] = await db(
+    `with acct as (
+       select id, currency from finance_accounts where id = $1 and workspace_id = $2
+     ), want as (
+       select coalesce($3::text, (select currency from acct)) as currency
+     ), rate as (
+       select rate_to_thb from finance_fx_rates
+       where currency = (select currency from want)
+       order by (as_of <= $4::date) desc, as_of desc
+       limit 1
+     ), person as (
+       select id from actors where workspace_id = $2 and kind = 'owner' limit 1
+     )
+     select (select currency from acct) as account_currency,
+            (select currency from want) as currency,
+            (select rate_to_thb from rate) as rate_to_thb,
+            (select id from person) as actor_id`,
+    [input.accountId, workspace, input.currency ?? null, input.occurredOn],
+  );
 
-  const rate = input.rateToThb && input.rateToThb > 0 ? input.rateToThb : await rateFor(currency, input.occurredOn);
+  if (!lookup?.account_currency) throw new Error("Account not found.");
+  const currency = (input.currency ?? String(lookup.account_currency)) as Currency;
+  const stored = num(lookup.rate_to_thb);
+  const rate = input.rateToThb && input.rateToThb > 0 ? input.rateToThb : currency === BASE ? 1 : stored;
+  if (!(rate > 0)) throw new Error(`No ${currency} → THB rate yet. Add one on the Money page.`);
   const amountThbMinor = Math.round(input.amountMinor * rate);
-  const actorId = input.actorId ?? (await getActorByKind(workspace, "owner"));
+  const actorId = input.actorId ?? (lookup.actor_id ? String(lookup.actor_id) : await ownerActorId());
 
-  const rows = await db`
-    insert into finance_transactions
-      (workspace_id, account_id, category_id, occurred_on, amount_minor, currency, rate_to_thb, amount_thb_minor,
-       payee, note, tags, source, external_id, actor_id)
-    values (${workspace}, ${input.accountId}, ${input.categoryId ?? null}, ${input.occurredOn}, ${input.amountMinor},
-            ${currency}, ${rate}, ${amountThbMinor}, ${input.payee ?? null}, ${input.note ?? null},
-            ${input.tags ?? []}, ${input.source ?? "manual"}, ${input.externalId ?? null}, ${actorId})
-    returning id`;
-  const created = await getTransaction(String(rows[0].id));
-  if (!created) throw new Error("The transaction was written but could not be read back.");
-  return created;
+  // The insert and the read-back are one statement, so the row the caller gets
+  // is the row the database stored.
+  const rows = await db(
+    `with ins as (
+       insert into finance_transactions
+         (workspace_id, account_id, category_id, occurred_on, amount_minor, currency, rate_to_thb, amount_thb_minor,
+          payee, note, tags, source, external_id, actor_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+       returning *
+     )
+     ${TX_COLUMNS}
+     from ins t
+     join finance_accounts a on a.id = t.account_id
+     left join finance_categories c on c.id = t.category_id`,
+    [
+      workspace,
+      input.accountId,
+      input.categoryId ?? null,
+      input.occurredOn,
+      input.amountMinor,
+      currency,
+      rate,
+      amountThbMinor,
+      input.payee ?? null,
+      input.note ?? null,
+      input.tags ?? [],
+      input.source ?? "manual",
+      input.externalId ?? null,
+      actorId,
+    ],
+  );
+  if (rows.length === 0) throw new Error("The transaction was written but could not be read back.");
+  return mapTx(rows[0] as Record<string, unknown>);
 }
 
 export async function getTransaction(id: string): Promise<TxRow | null> {
@@ -468,27 +547,53 @@ export async function updateTransaction(id: string, patch: Partial<TxInput>): Pr
   const occurredOn = patch.occurredOn ?? current.occurredOn;
   const amountMinor = patch.amountMinor ?? current.amountMinor;
   const currency = patch.currency ?? current.currency;
-  const rate = patch.rateToThb && patch.rateToThb > 0 ? patch.rateToThb : await rateFor(currency, occurredOn);
+  // Baht needs no lookup, so the common edit costs two round trips, not four.
+  const rate =
+    patch.rateToThb && patch.rateToThb > 0
+      ? patch.rateToThb
+      : currency === BASE
+        ? 1
+        : await rateFor(currency, occurredOn);
   const amountThbMinor = Math.round(amountMinor * rate);
 
-  await db`
-    update finance_transactions set
-      account_id = ${accountId},
-      category_id = ${patch.categoryId === undefined ? current.categoryId : patch.categoryId},
-      occurred_on = ${occurredOn},
-      amount_minor = ${amountMinor},
-      currency = ${currency},
-      rate_to_thb = ${rate},
-      amount_thb_minor = ${amountThbMinor},
-      payee = ${patch.payee === undefined ? current.payee : patch.payee},
-      note = ${patch.note === undefined ? current.note : patch.note},
-      tags = ${patch.tags ?? current.tags},
-      updated_at = now()
-    where id = ${id} and workspace_id = ${workspace}`;
-
-  const updated = await getTransaction(id);
-  if (!updated) throw new Error("Transaction not found.");
-  return updated;
+  const rows = await db(
+    `with upd as (
+       update finance_transactions set
+         account_id = $3,
+         category_id = $4,
+         occurred_on = $5,
+         amount_minor = $6,
+         currency = $7,
+         rate_to_thb = $8,
+         amount_thb_minor = $9,
+         payee = $10,
+         note = $11,
+         tags = $12,
+         updated_at = now()
+       where id = $1 and workspace_id = $2
+       returning *
+     )
+     ${TX_COLUMNS}
+     from upd t
+     join finance_accounts a on a.id = t.account_id
+     left join finance_categories c on c.id = t.category_id`,
+    [
+      id,
+      workspace,
+      accountId,
+      patch.categoryId === undefined ? current.categoryId : patch.categoryId,
+      occurredOn,
+      amountMinor,
+      currency,
+      rate,
+      amountThbMinor,
+      patch.payee === undefined ? current.payee : patch.payee,
+      patch.note === undefined ? current.note : patch.note,
+      patch.tags ?? current.tags,
+    ],
+  );
+  if (rows.length === 0) throw new Error("Transaction not found.");
+  return mapTx(rows[0] as Record<string, unknown>);
 }
 
 /** Soft delete: the row stays, so a mistake is recoverable from SQL. */
@@ -510,6 +615,9 @@ export type Summary = {
   netWorthThbMinor: number;
   byCurrency: { currency: Currency; balanceMinor: number; balanceThbMinor: number; rateToThb: number }[];
   accounts: AccountRow[];
+  /** The rates the numbers above were converted with, handed to the panel so
+   *  it does not ask for them a second time. */
+  rates: Record<Currency, RateRow | null>;
   incomeThbMinor: number;
   expenseThbMinor: number;
   netThbMinor: number;
@@ -582,6 +690,7 @@ export async function moneySummary(month: string = monthOf()): Promise<Summary> 
       rateToThb: rateOf(currency),
     })),
     accounts: withThb,
+    rates,
     incomeThbMinor,
     expenseThbMinor,
     netThbMinor: incomeThbMinor + expenseThbMinor,
@@ -708,8 +817,49 @@ export async function importCsv(input: string): Promise<ImportReport> {
   if (col.date < 0 || col.amount < 0) throw new Error('The file needs at least a "date" and an "amount" column.');
 
   const report: ImportReport = { inserted: 0, skipped: 0, createdAccounts: [], createdCategories: [], errors: [] };
-  const accounts = new Map((await listAccounts({ includeArchived: true })).map((a) => [a.name.toLowerCase(), a]));
-  const categories = new Map((await listCategories({ includeArchived: true })).map((c) => [c.name.toLowerCase(), c]));
+  const db = sql();
+  const workspace = await workspaceId();
+  const actorId = await ownerActorId();
+
+  // Everything the loop needs that does not change per row is fetched once.
+  // Per-row lookups made a two-hundred-line file cost six hundred round trips;
+  // the report is still per line, which is the part worth keeping exact.
+  const [accountRows, categoryRows, rateRows] = await Promise.all([
+    listAccounts({ includeArchived: true }),
+    listCategories({ includeArchived: true }),
+    db`select currency, rate_to_thb, as_of::text as as_of from finance_fx_rates order by currency, as_of desc`,
+  ]);
+  const accounts = new Map(accountRows.map((a) => [a.name.toLowerCase(), a]));
+  const categories = new Map(categoryRows.map((c) => [c.name.toLowerCase(), c]));
+
+  // Rates answered from memory: newest per currency first, so "the newest on or
+  // before the day" is the first match and the newest we have at all is the
+  // fallback — the same rule latestRates uses, without the round trip per row.
+  const ratesByCurrency = new Map<string, { asOf: string; rate: number }[]>();
+  for (const r of rateRows) {
+    const forCurrency = ratesByCurrency.get(String(r.currency)) ?? [];
+    forCurrency.push({ asOf: text(r.as_of).slice(0, 10), rate: num(r.rate_to_thb) });
+    ratesByCurrency.set(String(r.currency), forCurrency);
+  }
+  const rateOn = (currency: Currency, date: string): number => {
+    if (currency === BASE) return 1;
+    const forCurrency = ratesByCurrency.get(currency) ?? [];
+    const found = forCurrency.find((r) => r.asOf <= date) ?? forCurrency[0];
+    if (!found) throw new Error(`no ${currency} → THB rate stored yet`);
+    return found.rate;
+  };
+
+  // An exported file carries our row id per line. One query answers for all of
+  // them whether those rows are still here.
+  const claimedIds = rows
+    .slice(1)
+    .map((row) => (row[col.externalId] ?? "").trim())
+    .filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+  const existingIds = new Set<string>();
+  if (claimedIds.length > 0) {
+    const found = await db(`select id from finance_transactions where workspace_id = $1 and id = any($2::uuid[])`, [workspace, claimedIds]);
+    for (const r of found) existingIds.add(String(r.id));
+  }
 
   for (const [lineNumber, row] of rows.slice(1).entries()) {
     try {
@@ -744,8 +894,6 @@ export async function importCsv(input: string): Promise<ImportReport> {
       }
 
       const explicitRate = Number(cell(col.rate));
-      const db = sql();
-      const workspace = await workspaceId();
 
       // An exported file carries each row's own id in the external_id column.
       // If that row is still here, there is nothing to do — which is what makes
@@ -753,19 +901,16 @@ export async function importCsv(input: string): Promise<ImportReport> {
       const exportedId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cell(col.externalId))
         ? cell(col.externalId)
         : "";
-      if (exportedId) {
-        const found = await db`select id from finance_transactions where id = ${exportedId} and workspace_id = ${workspace} limit 1`;
-        if (found.length > 0) {
-          report.skipped += 1;
-          continue;
-        }
+      if (exportedId && existingIds.has(exportedId)) {
+        report.skipped += 1;
+        continue;
       }
 
       // Rows that came from a bank export have no id of ours, so the file's own
       // values become the fingerprint. Same row twice, same fingerprint.
       const externalId = cell(col.externalId) || `csv:${[date, accountName, amount, currency, cell(col.payee), cell(col.note)].join("|")}`;
       const amountMinor = toMinor(amount);
-      const rate = Number.isFinite(explicitRate) && explicitRate > 0 ? explicitRate : await rateFor(currency, date);
+      const rate = Number.isFinite(explicitRate) && explicitRate > 0 ? explicitRate : rateOn(currency, date);
 
       const inserted = await db`
         insert into finance_transactions
@@ -773,8 +918,7 @@ export async function importCsv(input: string): Promise<ImportReport> {
            payee, note, tags, source, external_id, actor_id)
         values (${workspace}, ${account.id}, ${categoryId}, ${date}, ${amountMinor}, ${currency},
                 ${rate}, ${Math.round(amountMinor * rate)}, ${cell(col.payee) || null}, ${cell(col.note) || null},
-                ${cell(col.tags) ? cell(col.tags).split(/[\s,]+/).filter(Boolean) : []}, 'csv', ${externalId},
-                ${await getActorByKind(workspace, "owner")})
+                ${cell(col.tags) ? cell(col.tags).split(/[\s,]+/).filter(Boolean) : []}, 'csv', ${externalId}, ${actorId})
         on conflict (workspace_id, external_id) where external_id is not null do nothing
         returning id`;
       if (inserted.length === 0) {

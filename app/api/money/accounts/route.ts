@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { accountsWithThb, createAccount, updateAccount, purgeAccount, toMinor, type AccountKind } from "@/lib/money";
+import { accountsWithThb, createAccount, updateAccount, purgeAccount, toMinor, todayISO, type AccountKind } from "@/lib/money";
 import { requireOwner } from "@/lib/owner-guard";
 
 export const runtime = "nodejs";
@@ -14,14 +14,15 @@ const CreateSchema = z.object({
   note: z.string().max(500).nullable().optional(),
 });
 
-const PatchSchema = CreateSchema.partial().extend({ id: z.string().uuid() });
+const PatchSchema = CreateSchema.partial().extend({ id: z.string().uuid(), archived: z.boolean().optional() });
 
 /** GET /api/money/accounts — every account with its balance in THB too. */
-export async function GET() {
+export async function GET(request: Request) {
   const denied = await requireOwner();
   if (denied) return denied;
+  const includeArchived = new URL(request.url).searchParams.get("all") === "1";
   try {
-    return NextResponse.json({ accounts: await accountsWithThb() });
+    return NextResponse.json({ accounts: await accountsWithThb(todayISO(), { includeArchived }) });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : "error" }, { status: 400 });
   }

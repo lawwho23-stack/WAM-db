@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/client-api";
 import {
   CURRENCIES,
@@ -22,9 +22,14 @@ import {
  * in place. The direction toggle ("money in" / "money out") is there because
  * typing a minus sign is the kind of small friction that stops people from
  * recording things at all.
+ *
+ * The first month and its rows arrive with the page, fetched on the server in
+ * parallel while the HTML is built. After that the list only asks again when a
+ * filter changes, and a write puts the row it just saved straight into the
+ * list — no refetch of things that cannot have changed.
  */
 
-type Filters = { month: string; accountId: string; categoryId: string; kind: string; q: string };
+type Filters = { month: string; accountId: string; categoryId: string; kind: string };
 
 type Draft = {
   accountId: string;
@@ -52,29 +57,54 @@ const emptyDraft = (accountId: string, currency: Currency): Draft => ({
   tags: "",
 });
 
-export default function MoneyTransactions({ initialMonth }: { initialMonth: string }) {
-  const [filters, setFilters] = useState<Filters>({ month: initialMonth, accountId: "", categoryId: "", kind: "", q: "" });
-  const [rows, setRows] = useState<TxRow[]>([]);
-  const [total, setTotal] = useState(0);
-  const [sumThbMinor, setSumThbMinor] = useState(0);
-  const [accounts, setAccounts] = useState<AccountRow[]>([]);
-  const [categories, setCategories] = useState<CategoryRow[]>([]);
-  const [rates, setRates] = useState<Record<string, RateRow | null>>({});
-  const [loading, setLoading] = useState(true);
+export default function MoneyTransactions({
+  initialMonth,
+  initialList,
+  initialAccounts,
+  initialCategories,
+  initialRates,
+}: {
+  initialMonth: string;
+  initialList: { rows: TxRow[]; total: number; sumThbMinor: number };
+  initialAccounts: AccountRow[];
+  initialCategories: CategoryRow[];
+  initialRates: Record<string, RateRow | null>;
+}) {
+  const [filters, setFilters] = useState<Filters>({ month: initialMonth, accountId: "", categoryId: "", kind: "" });
+  const [query, setQuery] = useState("");
+  const [settledQuery, setSettledQuery] = useState("");
+  const [rows, setRows] = useState<TxRow[]>(initialList.rows);
+  const [total, setTotal] = useState(initialList.total);
+  const [sumThbMinor, setSumThbMinor] = useState(initialList.sumThbMinor);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<string | null>(null);
 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+
+  // Accounts, categories and rates came in with the page and nothing on this
+  // page can change them, so they are read once and never fetched again.
+  const accounts = initialAccounts;
+  const categories = initialCategories;
+  const rates = initialRates;
 
   const openAccounts = useMemo(() => accounts.filter((a) => !a.archivedAt), [accounts]);
   const refresh = useCallback(() => setReload((n) => n + 1), []);
 
-  // The list itself.
+  // The list. The first month's rows came with the page, so the first run of
+  // this effect has nothing to do; after that, any change of the filters — or a
+  // reload after an import — asks the server.
+  const firstRun = useRef(true);
   useEffect(() => {
+    if (firstRun.current) {
+      firstRun.current = false;
+      return;
+    }
     const controller = new AbortController();
     (async () => {
       setLoading(true);
@@ -84,7 +114,7 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
         if (filters.accountId) p.set("accountId", filters.accountId);
         if (filters.categoryId) p.set("categoryId", filters.categoryId);
         if (filters.kind) p.set("kind", filters.kind);
-        if (filters.q.trim()) p.set("q", filters.q.trim());
+        if (settledQuery.trim()) p.set("q", settledQuery.trim());
         const body = await api<{ rows: TxRow[]; total: number; sumThbMinor: number }>(`/api/money/transactions?${p}`, {
           signal: controller.signal,
         });
@@ -99,27 +129,47 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
       }
     })();
     return () => controller.abort();
-  }, [filters, reload]);
+  }, [filters, settledQuery, reload]);
 
-  // Accounts, categories and rates change rarely, so they load once per refresh.
+  // Typing waits for a pause. Without this, "coffee" was six searches, six
+  // database reads, and a list that moved under you while you typed.
   useEffect(() => {
-    (async () => {
-      try {
-        const [a, c, r] = await Promise.all([
-          api<{ accounts: AccountRow[] }>("/api/money/accounts"),
-          api<{ categories: CategoryRow[] }>("/api/money/categories"),
-          api<{ current: Record<string, RateRow | null> }>("/api/money/rates"),
-        ]);
-        setAccounts(a.accounts);
-        setCategories(c.categories);
-        setRates(r.current);
-      } catch {
-        /* the list below will already be showing an error */
-      }
-    })();
-  }, [reload]);
+    if (query === settledQuery) return;
+    const timer = setTimeout(() => setSettledQuery(query), 250);
+    return () => clearTimeout(timer);
+  }, [query, settledQuery]);
 
   const currencyOf = (accountId: string): Currency => openAccounts.find((a) => a.id === accountId)?.currency ?? "THB";
+
+  /** Would this row show up in the list as it is filtered right now? */
+  function shows(row: TxRow): boolean {
+    if (filters.month && row.occurredOn.slice(0, 7) !== filters.month) return false;
+    if (filters.accountId && row.accountId !== filters.accountId) return false;
+    if (filters.categoryId && row.categoryId !== filters.categoryId) return false;
+    if (filters.kind === "income" && row.amountMinor <= 0) return false;
+    if (filters.kind === "expense" && row.amountMinor >= 0) return false;
+    const term = settledQuery.trim().toLowerCase();
+    if (term) {
+      const haystack = [row.payee, row.note, row.categoryName, row.accountName].filter(Boolean).join(" ").toLowerCase();
+      if (!haystack.includes(term)) return false;
+    }
+    return true;
+  }
+
+  // A saved row goes straight into the list. The write already returned it, and
+  // asking for the whole month again to be told what we were just told is what
+  // made every save feel two beats slow.
+  function applySaved(row: TxRow, previous: TxRow | null) {
+    const shownBefore = previous !== null && rows.some((r) => r.id === previous.id);
+    const wanted = shows(row);
+    setRows((prev) => {
+      const rest = prev.filter((r) => r.id !== row.id);
+      if (!wanted) return rest;
+      return [row, ...rest].sort((a, b) => (a.occurredOn === b.occurredOn ? 0 : a.occurredOn < b.occurredOn ? 1 : -1));
+    });
+    setTotal((n) => Math.max(0, n + (wanted ? 1 : 0) - (shownBefore ? 1 : 0)));
+    setSumThbMinor((n) => n + (wanted ? row.amountThbMinor : 0) - (shownBefore && previous ? previous.amountThbMinor : 0));
+  }
 
   function startNew() {
     const first = openAccounts[0];
@@ -174,13 +224,18 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
 
     try {
       if (editingId) {
-        await api(`/api/money/transactions/${editingId}`, { method: "PATCH", body: JSON.stringify(body) });
+        const previous = rows.find((r) => r.id === editingId) ?? null;
+        const { transaction } = await api<{ transaction: TxRow }>(`/api/money/transactions/${editingId}`, {
+          method: "PATCH",
+          body: JSON.stringify(body),
+        });
+        applySaved(transaction, previous);
       } else {
-        await api("/api/money/transactions", { method: "POST", body: JSON.stringify(body) });
+        const { transaction } = await api<{ transaction: TxRow }>("/api/money/transactions", { method: "POST", body: JSON.stringify(body) });
+        applySaved(transaction, null);
       }
       setDraft(null);
       setEditingId(null);
-      refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save.");
     } finally {
@@ -188,17 +243,22 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
     }
   }
 
-  async function remove(id: string) {
+  async function remove(row: TxRow) {
+    setBusyId(row.id);
     try {
-      await api(`/api/money/transactions/${id}`, { method: "DELETE" });
+      await api(`/api/money/transactions/${row.id}`, { method: "DELETE" });
+      setRows((prev) => prev.filter((r) => r.id !== row.id));
+      setTotal((n) => Math.max(0, n - 1));
+      setSumThbMinor((n) => n - row.amountThbMinor);
       setConfirmId(null);
-      if (editingId === id) {
+      if (editingId === row.id) {
         setEditingId(null);
         setDraft(null);
       }
-      refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not delete.");
+    } finally {
+      setBusyId(null);
     }
   }
 
@@ -227,7 +287,7 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
   }
 
   const exportHref = `/api/money/export?${new URLSearchParams(
-    Object.entries({ month: filters.month, accountId: filters.accountId, categoryId: filters.categoryId, q: filters.q.trim() }).filter(
+    Object.entries({ month: filters.month, accountId: filters.accountId, categoryId: filters.categoryId, q: settledQuery.trim() }).filter(
       ([, v]) => v,
     ) as [string, string][],
   )}`;
@@ -283,8 +343,8 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
           <input
             className="input"
             placeholder="payee, note, category…"
-            value={filters.q}
-            onChange={(e) => setFilters((f) => ({ ...f, q: e.target.value }))}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
           />
         </label>
         <div className="flex gap-2">
@@ -468,6 +528,7 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
           <div>
             <h2 className="text-[13px] font-medium tracking-wide text-ink">
               {loading && rows.length === 0 ? "Loading…" : `${total} transaction${total === 1 ? "" : "s"}`}
+              {loading && rows.length > 0 ? <span className="ml-1.5 text-[11.5px] font-normal text-faint">updating…</span> : null}
             </h2>
             <p className="mt-0.5 text-[11.5px] text-faint">
               Net for this view: <span className={`num ${sumThbMinor < 0 ? "text-rose" : "text-mint"}`}>{fmt(sumThbMinor, "THB")}</span>
@@ -531,8 +592,13 @@ export default function MoneyTransactions({ initialMonth }: { initialMonth: stri
                   </button>
                   {confirmId === row.id ? (
                     <>
-                      <button className="btn btn-danger px-2 py-1 text-[11px]" type="button" onClick={() => void remove(row.id)}>
-                        Delete
+                      <button
+                        className="btn btn-danger px-2 py-1 text-[11px]"
+                        type="button"
+                        disabled={busyId === row.id}
+                        onClick={() => void remove(row)}
+                      >
+                        {busyId === row.id ? "…" : "Delete"}
                       </button>
                       <button className="btn px-2 py-1 text-[11px]" type="button" onClick={() => setConfirmId(null)}>
                         No

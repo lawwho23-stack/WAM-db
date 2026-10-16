@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "@/lib/client-api";
 import {
   ACCOUNT_KINDS,
@@ -20,29 +20,27 @@ import {
 
 const blank = { name: "", kind: "bank" as AccountKind, currency: "THB" as Currency, openingBalance: "", note: "" };
 
-export default function AccountManager() {
-  const [accounts, setAccounts] = useState<AccountRow[]>([]);
-  const [loading, setLoading] = useState(true);
+export default function AccountManager({ initialAccounts }: { initialAccounts: AccountRow[] }) {
+  const [accounts, setAccounts] = useState<AccountRow[]>(initialAccounts);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState(blank);
   const [showArchived, setShowArchived] = useState(false);
   const [confirmId, setConfirmId] = useState<string | null>(null);
-  const [reload, setReload] = useState(0);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const body = await api<{ accounts: AccountRow[] }>("/api/money/accounts");
-        setAccounts(body.accounts);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Could not load accounts.");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [reload]);
+  // Balances are computed from the transactions, so a change to an account's
+  // name, kind, currency or opening balance is answered by re-reading the list.
+  // Archiving and deleting change nothing else, so those are applied straight
+  // to what is already on screen.
+  async function load() {
+    try {
+      const body = await api<{ accounts: AccountRow[] }>("/api/money/accounts?all=1");
+      setAccounts(body.accounts);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load accounts.");
+    }
+  }
 
   const visible = accounts.filter((a) => (showArchived ? true : !a.archivedAt));
   const netThb = accounts.filter((a) => !a.archivedAt).reduce((sum, a) => sum + a.balanceThbMinor, 0);
@@ -75,7 +73,7 @@ export default function AccountManager() {
       else await api("/api/money/accounts", { method: "POST", body: JSON.stringify(body) });
       setForm(blank);
       setEditingId(null);
-      setReload((n) => n + 1);
+      await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the account.");
     } finally {
@@ -86,7 +84,10 @@ export default function AccountManager() {
   async function setArchived(account: AccountRow, archived: boolean) {
     try {
       await api("/api/money/accounts", { method: "PATCH", body: JSON.stringify({ id: account.id, archived }) });
-      setReload((n) => n + 1);
+      // Only the flag moved, and the page can draw that itself.
+      setAccounts((prev) =>
+        prev.map((a) => (a.id === account.id ? { ...a, archivedAt: archived ? new Date().toISOString() : null } : a)),
+      );
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not change the account.");
     }
@@ -101,7 +102,7 @@ export default function AccountManager() {
         setEditingId(null);
         setForm(blank);
       }
-      setReload((n) => n + 1);
+      setAccounts((prev) => prev.filter((a) => a.id !== id));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not delete the account.");
     }
@@ -149,7 +150,17 @@ export default function AccountManager() {
           </label>
           <label>
             <span className="label mb-1.5 block">Currency</span>
-            <select className="select" value={form.currency} onChange={(e) => setForm({ ...form, currency: e.target.value as Currency })}>
+            <select
+              className="select disabled:opacity-60"
+              value={form.currency}
+              disabled={editingId !== null}
+              title={
+                editingId
+                  ? "An account's currency cannot change once it exists — every transaction keeps the rate it was recorded at. Delete a fresh one and add it again instead."
+                  : undefined
+              }
+              onChange={(e) => setForm({ ...form, currency: e.target.value as Currency })}
+            >
               {CURRENCIES.map((c) => (
                 <option key={c} value={c}>
                   {c}
@@ -190,7 +201,7 @@ export default function AccountManager() {
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-3">
           <div>
             <h2 className="text-[13px] font-medium tracking-wide text-ink">
-              {loading ? "Loading…" : `${visible.length} account${visible.length === 1 ? "" : "s"}`}
+              {visible.length} account{visible.length === 1 ? "" : "s"}
             </h2>
             <p className="mt-0.5 text-[11.5px] text-faint">
               Everything, in baht: <span className="num text-ink">{fmt(netThb, "THB")}</span>
@@ -202,7 +213,7 @@ export default function AccountManager() {
           </label>
         </div>
 
-        {visible.length === 0 && !loading ? (
+        {visible.length === 0 ? (
           <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
             <span className="h-1.5 w-1.5 rounded-full bg-cyan/60 shadow-[0_0_12px_var(--color-cyan)]" />
             <p className="text-[13px] text-faint">No accounts yet. Add where your money actually sits.</p>

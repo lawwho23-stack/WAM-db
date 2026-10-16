@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { api } from "@/lib/client-api";
 import type { CategoryKind, CategoryRow } from "@/lib/money-types";
 
@@ -11,28 +11,17 @@ import type { CategoryKind, CategoryRow } from "@/lib/money-types";
 
 const SWATCHES = ["#5ee7ff", "#63f2c0", "#9b8cff", "#ffc46b", "#ff7b9c", "#8a94ac"];
 
-export default function CategoryManager() {
-  const [categories, setCategories] = useState<CategoryRow[]>([]);
-  const [loading, setLoading] = useState(true);
+export default function CategoryManager({ initialCategories }: { initialCategories: CategoryRow[] }) {
+  const [categories, setCategories] = useState<CategoryRow[]>(initialCategories);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [showArchived, setShowArchived] = useState(false);
   const [form, setForm] = useState({ name: "", kind: "expense" as CategoryKind, color: SWATCHES[0] });
-  const [reload, setReload] = useState(0);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        const body = await api<{ categories: CategoryRow[] }>("/api/money/categories?all=1");
-        setCategories(body.categories);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : "Could not load categories.");
-      } finally {
-        setLoading(false);
-      }
-    })();
-  }, [reload]);
+  // Same order the server would return: income above expense, then by name.
+  const ordered = (list: CategoryRow[]): CategoryRow[] =>
+    [...list].sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind < b.kind ? 1 : -1));
 
   const visible = categories.filter((c) => (showArchived ? true : !c.archivedAt));
   const income = visible.filter((c) => c.kind === "income");
@@ -49,11 +38,20 @@ export default function CategoryManager() {
     setError(null);
     const body = { name: form.name.trim(), kind: form.kind, color: form.color };
     try {
-      if (editingId) await api("/api/money/categories", { method: "PATCH", body: JSON.stringify({ id: editingId, ...body }) });
-      else await api("/api/money/categories", { method: "POST", body: JSON.stringify(body) });
+      // The write returns the row it wrote, so the list is updated from that
+      // instead of asking for every category again.
+      if (editingId) {
+        const { category } = await api<{ category: CategoryRow }>("/api/money/categories", {
+          method: "PATCH",
+          body: JSON.stringify({ id: editingId, ...body }),
+        });
+        setCategories((prev) => ordered(prev.map((c) => (c.id === category.id ? { ...category, txCount: c.txCount } : c))));
+      } else {
+        const { category } = await api<{ category: CategoryRow }>("/api/money/categories", { method: "POST", body: JSON.stringify(body) });
+        setCategories((prev) => ordered([...prev.filter((c) => c.id !== category.id), category]));
+      }
       setForm({ name: "", kind: form.kind, color: SWATCHES[0] });
       setEditingId(null);
-      setReload((n) => n + 1);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the category.");
     } finally {
@@ -64,7 +62,7 @@ export default function CategoryManager() {
   async function setArchived(category: CategoryRow, archived: boolean) {
     try {
       await api("/api/money/categories", { method: "PATCH", body: JSON.stringify({ id: category.id, archived }) });
-      setReload((n) => n + 1);
+      setCategories((prev) => prev.map((c) => (c.id === category.id ? { ...c, archivedAt: archived ? new Date().toISOString() : null } : c)));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not change the category.");
     }
@@ -158,14 +156,10 @@ export default function CategoryManager() {
         {error ? <p className="mt-3 text-[12.5px] text-rose">{error}</p> : null}
       </form>
 
-      {loading ? (
-        <p className="text-[12.5px] text-faint">Loading…</p>
-      ) : (
-        <div className="grid gap-5 lg:grid-cols-2">
-          {list("Money out", expense)}
-          {list("Money in", income)}
-        </div>
-      )}
+      <div className="grid gap-5 lg:grid-cols-2">
+        {list("Money out", expense)}
+        {list("Money in", income)}
+      </div>
     </div>
   );
 }
