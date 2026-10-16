@@ -1,7 +1,7 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { bearerFrom, resolveToken, touchToken, type TokenContext } from "@/lib/auth-tokens";
+import { bearerFrom, resolveToken, touchToken, actorForToken, type TokenContext } from "@/lib/auth-tokens";
 import {
   getContext,
   searchMemory,
@@ -156,6 +156,7 @@ const mcpHandler = createMcpHandler(
             labels: args.labels,
             trust: args.trust ?? "agent_reported",
             actorKind: "agent",
+            actorId: await actorForToken(me),
             source: `mcp:${me.tokenName}`,
           });
           return { ...result, note: result.deduped ? "Identical memory already existed." : "Stored and queued for embedding." };
@@ -178,7 +179,8 @@ const mcpHandler = createMcpHandler(
       },
       guard(async ({ id, content, reason }: { id: string; content: string; reason?: string }) => {
         requireWrite();
-        return updateMemory(id, content, reason ?? "mcp edit");
+        const me = auth();
+        return updateMemory(id, content, reason ?? `edit via ${me.tokenName}`, await actorForToken(me));
       }),
     );
 

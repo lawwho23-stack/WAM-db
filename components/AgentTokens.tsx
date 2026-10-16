@@ -73,15 +73,24 @@ export default function AgentTokens({ tokens, scopes }: { tokens: TokenRow[]; sc
 
   async function revoke(id: string, label: string) {
     if (!confirm(`Revoke “${label}”? Any agent using it loses access immediately.`)) return;
+    await remove(id, `/api/tokens/${id}`, "Could not revoke");
+  }
+
+  async function purge(id: string, label: string) {
+    if (!confirm(`Remove “${label}” from the list? Revoked tokens hold no value; the name becomes reusable.`)) return;
+    await remove(id, `/api/tokens/${id}?purge=1`, "Could not remove");
+  }
+
+  async function remove(id: string, url: string, message: string) {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`/api/tokens/${id}`, { method: "DELETE" });
+      const res = await fetch(url, { method: "DELETE" });
       const data = await res.json();
-      if (!res.ok || data.error) throw new Error(typeof data.error === "string" ? data.error : "Could not revoke");
+      if (!res.ok || data.error) throw new Error(typeof data.error === "string" ? data.error : message);
       router.refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not revoke");
+      setError(e instanceof Error ? e.message : message);
     } finally {
       setBusy(false);
     }
@@ -229,6 +238,9 @@ export default function AgentTokens({ tokens, scopes }: { tokens: TokenRow[]; sc
                 <span className="min-w-[160px] flex-1 text-muted">{t.name}</span>
                 <span className="num">{t.token_prefix}……</span>
                 <span className="num">revoked {relTime(t.revoked_at)}</span>
+                <button className="btn" disabled={busy} onClick={() => purge(t.id, t.name)} type="button">
+                  Remove
+                </button>
               </li>
             ))}
           </ul>

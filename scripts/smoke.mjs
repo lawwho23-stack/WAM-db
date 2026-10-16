@@ -95,11 +95,15 @@ async function main() {
     const created = await jsonFetch("/api/tokens", {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ name: `smoke-${Date.now()}`, scope: null, canRead: true, canWrite: true }),
+      body: JSON.stringify({ name: "smoke-test", scope: null, canRead: true, canWrite: true }),
     });
     token = created.body?.token ?? null;
     if (created.body?.id) createdIds.push(created.body.id);
-    record("create an agent token", Boolean(token), token ? `prefix ${token.slice(0, 12)}…` : JSON.stringify(created.body).slice(0, 120));
+    record(
+      "create an agent token",
+      Boolean(token),
+      token ? `prefix ${token.slice(0, 12)}…` : String(created.body?.error ?? JSON.stringify(created.body)).slice(0, 120),
+    );
     if (!token) return;
   } else {
     record("using supplied MCP_TOKEN", true);
@@ -187,7 +191,7 @@ async function main() {
     const scoped = await jsonFetch("/api/tokens", {
       method: "POST",
       headers: headers(),
-      body: JSON.stringify({ name: `smoke-scoped-${Date.now()}`, scope: "pr-reviewer", canRead: true, canWrite: false }),
+      body: JSON.stringify({ name: "smoke-scoped", scope: "pr-reviewer", canRead: true, canWrite: false }),
     });
     if (scoped.body?.id) createdIds.push(scoped.body.id);
     if (scoped.body?.token) {
@@ -263,9 +267,11 @@ async function main() {
     }
   }
   for (const id of createdIds) {
-    await jsonFetch(`/api/tokens/${id}`, { method: "DELETE", headers: headers() });
+    // Purge, not revoke: a test token has no record value, and purging keeps
+    // the same names reusable on the next run.
+    await jsonFetch(`/api/tokens/${id}?purge=1`, { method: "DELETE", headers: headers() });
   }
-  if (createdIds.length) record("cleanup: revoked test tokens", true, `${createdIds.length} revoked`);
+  if (createdIds.length) record("cleanup: purged test tokens", true, `${createdIds.length} removed`);
 
   const failed = results.filter((r) => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed${failed.length ? `, ${failed.length} failed` : ""}\n`);

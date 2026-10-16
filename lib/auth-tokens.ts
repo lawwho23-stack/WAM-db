@@ -72,8 +72,14 @@ export async function listTokens() {
     ORDER BY t.created_at DESC`;
 }
 
-export async function revokeToken(id: string) {
+export async function revokeToken(id: string, purge = false) {
   const db = sql();
+  if (purge) {
+    // Hard delete: removes the row entirely, for test tokens and rotated keys.
+    const rows = await db`DELETE FROM api_tokens WHERE id = ${id} RETURNING id`;
+    if (rows.length === 0) throw new Error("Token not found.");
+    return { id, purged: true };
+  }
   const rows = await db`UPDATE api_tokens SET revoked_at = now() WHERE id = ${id} AND revoked_at IS NULL RETURNING id`;
   if (rows.length === 0) throw new Error("Token not found or already revoked.");
   return { id, revoked: true };
@@ -103,6 +109,29 @@ export async function resolveToken(raw: string): Promise<TokenContext | null> {
 export async function touchToken(id: string) {
   const db = sql();
   await db`UPDATE api_tokens SET last_used_at = now() WHERE id = ${id}`;
+}
+
+/**
+ * Find or create the `actors` row that represents this token's agent, so
+ * history says which agent wrote what instead of one generic "agent".
+ * Relies on uq_actors_workspace_kind_name (migrations/002_actor_identity.sql).
+ */
+export async function actorForToken(ctx: TokenContext): Promise<string> {
+  const db = sql();
+  const name = ctx.tokenName.slice(0, 64);
+  const existing = await db`SELECT id FROM actors WHERE workspace_id = ${ctx.workspaceId} AND kind = 'agent' AND display_name = ${name} LIMIT 1`;
+  if (existing.length > 0) return existing[0].id as string;
+
+  const inserted = await db`INSERT INTO actors (workspace_id, kind, display_name)
+    VALUES (${ctx.workspaceId}, 'agent', ${name})
+    ON CONFLICT (workspace_id, kind, display_name) DO NOTHING
+    RETURNING id`;
+  if (inserted.length > 0) return inserted[0].id as string;
+
+  // Lost a race with a concurrent create.
+  const again = await db`SELECT id FROM actors WHERE workspace_id = ${ctx.workspaceId} AND kind = 'agent' AND display_name = ${name} LIMIT 1`;
+  if (again.length === 0) throw new Error(`Could not resolve an actor for token '${ctx.tokenName}'.`);
+  return again[0].id as string;
 }
 
 /** Constant-time compare helper for any future shared-secret checks. */

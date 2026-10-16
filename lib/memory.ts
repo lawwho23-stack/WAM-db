@@ -23,6 +23,7 @@ export type WriteInput = {
   importance?: number;
   labels?: string[];
   actorKind?: string; // 'owner' | 'agent'
+  actorId?: string; // explicit actor, e.g. the agent behind a token
   source?: string; // what wrote it, e.g. 'mcp:claude-code'
 };
 
@@ -95,7 +96,7 @@ async function markJob(db: ReturnType<typeof sql>, refId: string, kind: string, 
 export async function writeMemory(input: WriteInput) {
   const db = sql();
   const scope = await getScope(input.scope);
-  const actorId = await getActorByKind(scope.workspace_id, input.actorKind ?? "agent");
+  const actorId = input.actorId ?? (await getActorByKind(scope.workspace_id, input.actorKind ?? "agent"));
   const hash = contentHash(input.content);
 
   const dup = await db`SELECT id FROM memories WHERE scope_id = ${scope.id} AND type = ${input.type} AND content_hash = ${hash} AND state = 'active' LIMIT 1`;
@@ -140,17 +141,17 @@ export async function writeMemory(input: WriteInput) {
 }
 
 /** Edit a memory: new version row, re-embed, keep the old text in history. */
-export async function updateMemory(id: string, content: string, reason = "edit") {
+export async function updateMemory(id: string, content: string, reason = "edit", actorId?: string) {
   const db = sql();
   const cur = await db`SELECT id, workspace_id, scope_id, version FROM memories WHERE id = ${id} LIMIT 1`;
   if (cur.length === 0) throw new Error("Memory not found");
   const m = cur[0] as { workspace_id: string; scope_id: string; version: number };
-  const actorId = await getActorByKind(m.workspace_id, "owner");
+  const who = actorId ?? (await getActorByKind(m.workspace_id, "owner"));
   const hash = contentHash(content);
   const next = (m.version as number) + 1;
 
   await db`UPDATE memories SET content = ${content}, content_hash = ${hash}, version = ${next}, updated_at = now() WHERE id = ${id}`;
-  await db`INSERT INTO memory_versions (memory_id, version, content, state, actor_id, reason) VALUES (${id}, ${next}, ${content}, 'active', ${actorId}, ${reason})`;
+  await db`INSERT INTO memory_versions (memory_id, version, content, state, actor_id, reason) VALUES (${id}, ${next}, ${content}, 'active', ${who}, ${reason})`;
   await queueJob(db, { workspaceId: m.workspace_id, scopeId: m.scope_id, kind: "embed", refType: "memory", refId: id });
 
   try {
