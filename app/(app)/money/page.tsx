@@ -41,6 +41,18 @@ export default async function MoneyPage({ searchParams }: { searchParams: Promis
   const categoryMax = Math.max(...s.byCategory.map((c) => Math.abs(c.totalThbMinor)), 1);
   const hasAccounts = s.accounts.length > 0;
 
+  // What the day's dollar makes of these numbers. It is the same rate this page
+  // already converted with — kept fresh by the nightly rate job, or by hand
+  // from the panel below — so the dollar line and the baht figure above it can
+  // never tell two different stories. No rate, or nothing to convert, and the
+  // line simply is not there.
+  const usd = s.rates.USD;
+  const dollars = (thbMinor: number) => {
+    if (!usd || !(usd.rateToThb > 0) || thbMinor === 0) return null;
+    return <span className="num">≈ {fmt(Math.round((thbMinor / 100 / usd.rateToThb) * 100), "USD")}</span>;
+  };
+  const showsDollars = dollars(s.netWorthThbMinor) !== null || dollars(s.incomeThbMinor) !== null || dollars(s.netThbMinor) !== null;
+
   return (
     <>
       <PageHeader
@@ -89,31 +101,43 @@ export default async function MoneyPage({ searchParams }: { searchParams: Promis
         </Panel>
       ) : (
         <div className="space-y-5">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Stat
-              label="Net worth, in baht"
-              value={fmtCompact(s.netWorthThbMinor)}
-              hint="all accounts at today's rates"
-              tone="cyan"
-            />
-            <Stat
-              label={`In · ${s.label}`}
-              value={fmtCompact(s.incomeThbMinor)}
-              hint={`${s.byCategory.filter((c) => c.kind === "income").length} income categories`}
-              tone="mint"
-            />
-            <Stat
-              label={`Out · ${s.label}`}
-              value={fmtCompact(Math.abs(s.expenseThbMinor))}
-              hint={`${s.txCount} transaction${s.txCount === 1 ? "" : "s"} this month`}
-              tone="rose"
-            />
-            <Stat
-              label="Kept this month"
-              value={fmtCompact(s.netThbMinor)}
-              hint={s.netThbMinor >= 0 ? "you spent less than came in" : "you spent more than came in"}
-              tone={s.netThbMinor >= 0 ? "violet" : "amber"}
-            />
+          <div className="space-y-2">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <Stat
+                label="Net worth, in baht"
+                value={fmtCompact(s.netWorthThbMinor)}
+                extra={dollars(s.netWorthThbMinor)}
+                hint="all accounts at today's rates"
+                tone="cyan"
+              />
+              <Stat
+                label={`In · ${s.label}`}
+                value={fmtCompact(s.incomeThbMinor)}
+                extra={dollars(s.incomeThbMinor)}
+                hint={`${s.byCategory.filter((c) => c.kind === "income").length} income categories`}
+                tone="mint"
+              />
+              <Stat
+                label={`Out · ${s.label}`}
+                value={fmtCompact(Math.abs(s.expenseThbMinor))}
+                extra={dollars(Math.abs(s.expenseThbMinor))}
+                hint={`${s.txCount} transaction${s.txCount === 1 ? "" : "s"} this month`}
+                tone="rose"
+              />
+              <Stat
+                label="Kept this month"
+                value={fmtCompact(s.netThbMinor)}
+                extra={dollars(s.netThbMinor)}
+                hint={s.netThbMinor >= 0 ? "you spent less than came in" : "you spent more than came in"}
+                tone={s.netThbMinor >= 0 ? "violet" : "amber"}
+              />
+            </div>
+            {usd && showsDollars ? (
+              <p className="text-right text-[11px] text-faint">
+                Dollars at the day&apos;s rate: 1 USD = ฿{usd.rateToThb.toFixed(4)} · {shortDate(usd.asOf)} ·{" "}
+                {usd.source === "manual" ? "set by hand" : "from the daily rate job"}
+              </p>
+            ) : null}
           </div>
 
           <div className="grid gap-5 lg:grid-cols-[1.5fr_1fr]">

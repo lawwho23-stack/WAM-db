@@ -50,7 +50,20 @@ export function PanelHeader({ title, hint, right }: { title: string; hint?: stri
   );
 }
 
-export function Stat({ label, value, hint, tone = "ink" }: { label: string; value: ReactNode; hint?: string; tone?: "ink" | "cyan" | "violet" | "mint" | "amber" | "rose" }) {
+export function Stat({
+  label,
+  value,
+  hint,
+  extra,
+  tone = "ink",
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: string;
+  /** A second reading of the same number — another currency, a comparison. */
+  extra?: ReactNode;
+  tone?: "ink" | "cyan" | "violet" | "mint" | "amber" | "rose";
+}) {
   const toneClass = {
     ink: "text-ink",
     cyan: "text-cyan",
@@ -63,6 +76,7 @@ export function Stat({ label, value, hint, tone = "ink" }: { label: string; valu
     <div className="panel px-4 py-3.5">
       <p className="label">{label}</p>
       <p className={`num mt-2 text-[22px] leading-none ${toneClass}`}>{value}</p>
+      {extra ? <p className="mt-1.5 text-[12px] text-muted">{extra}</p> : null}
       {hint ? <p className="mt-1.5 text-[11px] text-faint">{hint}</p> : null}
     </div>
   );
