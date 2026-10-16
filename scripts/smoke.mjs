@@ -12,7 +12,8 @@
 //                     deployments (x-vercel-protection-bypass header)
 //
 // Checks: health, the owner gate, token creation, the MCP handshake, all
-// read/write paths, hybrid search, the job runner, then cleans up after itself.
+// read/write paths, hybrid search, the money round trip, the job runner, then
+// cleans up after itself.
 
 import { readFileSync } from "node:fs";
 
@@ -198,7 +199,7 @@ async function main() {
   // 6. tools/list
   const list = await mcp("tools/list", {});
   const tools = (list.message?.result?.tools ?? []).map((t) => t.name);
-  record("tools/list returns the tool set", tools.length >= 10, `${tools.length} tools: ${tools.join(", ")}`);
+  record("tools/list returns the tool set", tools.length >= 13, `${tools.length} tools: ${tools.join(", ")}`);
 
   // 7. get_context
   const ctx = await mcp("tools/call", { name: "get_context", arguments: { scope: "laww-personal" } });
@@ -325,7 +326,88 @@ async function main() {
     record("pin toggle works", pinned.status === 200 && Array.isArray(pinned.body?.pin?.labels) && pinned.body.pin.labels.includes("pinned"), `labels ${JSON.stringify(pinned.body?.pin?.labels)}`);
   }
 
-  // 17. cleanup: hide the markers and revoke the tokens this run created
+  // 17. money: the owner writes it through the API, an agent may only read it
+  const today = new Date().toISOString().slice(0, 10);
+  const month = today.slice(0, 7);
+  const runStamp = Date.now();
+
+  const thbAccount = await jsonFetch("/api/money/accounts", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ name: `smoke-cash-${runStamp}`, kind: "cash", currency: "THB", openingBalance: 100 }),
+  });
+  const usdAccount = await jsonFetch("/api/money/accounts", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ name: `smoke-usd-${runStamp}`, kind: "bank", currency: "USD", openingBalance: 0 }),
+  });
+  record(
+    "money: an account can be opened in any of the three currencies",
+    thbAccount.status === 201 && usdAccount.status === 201 && thbAccount.body?.account?.currency === "THB" && usdAccount.body?.account?.currency === "USD",
+    `${thbAccount.body?.account?.name ?? "?"} and ${usdAccount.body?.account?.name ?? "?"}`,
+  );
+
+  const spend = await jsonFetch("/api/money/transactions", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ accountId: thbAccount.body?.account?.id, occurredOn: today, amount: -42.5, payee: "smoke lunch" }),
+  });
+  const earning = await jsonFetch("/api/money/transactions", {
+    method: "POST",
+    headers: headers(),
+    body: JSON.stringify({ accountId: usdAccount.body?.account?.id, occurredOn: today, amount: 10, payee: "smoke invoice" }),
+  });
+  const spendTx = spend.body?.transaction;
+  const earningTx = earning.body?.transaction;
+  record("money: a baht amount keeps its exact value", spendTx?.amountThbMinor === -4250, `${spendTx?.amount ?? spendTx?.amountMinor ?? "?"} → ${spendTx?.amountThbMinor ?? "?"} minor`);
+  record(
+    "money: a dollar amount converts at the rate stored on its own row",
+    Boolean(earningTx) && earningTx.rateToThb > 30 && earningTx.amountThbMinor === Math.round(earningTx.amountMinor * earningTx.rateToThb),
+    `$${earningTx ? earningTx.amountMinor / 100 : "?"} × ${earningTx?.rateToThb?.toFixed(4) ?? "?"} = ${earningTx?.amountThbMinor ?? "?"} minor`,
+  );
+
+  const summary = await jsonFetch(`/api/money/summary?month=${month}`, { headers: headers() });
+  record(
+    "money: the summary reports everything in baht",
+    summary.status === 200 && summary.body?.netWorthThbMinor > 0 && summary.body?.byCurrency?.length === 3 && summary.body?.expenseThbMinor <= -4250,
+    `net worth ${summary.body?.netWorthThbMinor ?? "?"} minor, out ${summary.body?.expenseThbMinor ?? "?"} minor`,
+  );
+
+  const moneyRead = await mcp("tools/call", { name: "money_summary", arguments: { month } });
+  const moneyText = toolResult(moneyRead);
+  const wallets = await mcp("tools/call", { name: "list_accounts", arguments: {} });
+  const ledger = await mcp("tools/call", { name: "list_transactions", arguments: { q: "smoke invoice" } });
+  record(
+    "money: an agent can read the summary over MCP",
+    typeof moneyText === "string" && moneyText.includes("Net worth") && moneyText.includes(month),
+    typeof moneyText === "string" ? moneyText.split("\n")[0].slice(0, 90) : "no text",
+  );
+  record(
+    "money: an agent can list accounts and transactions",
+    Array.isArray(toolResult(wallets)?.accounts) && toolResult(ledger)?.transactions?.some((t) => t.payee === "smoke invoice"),
+    `${toolResult(wallets)?.accounts?.length ?? "?"} accounts, ${toolResult(ledger)?.total ?? "?"} matching row(s)`,
+  );
+  record(
+    "money: no MCP tool can write money",
+    typeof tools !== "undefined" && !tools.some((t) => /^(add|create|write|record|update|delete|set)_/.test(t) && /money|transaction|account|finance/.test(t)),
+    `money tools are ${(tools ?? []).filter((t) => /money|account|transaction/.test(t)).join(", ")}`,
+  );
+
+  const csvResponse = await fetch(`${base}/api/money/export?month=${month}`, { headers: headers() });
+  const csvText = await csvResponse.text();
+  const reimported = await fetch(`${base}/api/money/import`, {
+    method: "POST",
+    headers: { ...headers(), "content-type": "text/csv" },
+    body: csvText,
+  });
+  const report = await reimported.json().catch(() => ({}));
+  record(
+    "money: a CSV round trip exports and re-imports without duplicating",
+    csvResponse.status === 200 && csvText.includes("smoke invoice") && report.inserted === 0 && report.skipped >= 2,
+    `${csvText.split("\n").filter((l) => /^\d/.test(l)).length} rows out, inserted ${report.inserted ?? "?"}, skipped ${report.skipped ?? "?"}`,
+  );
+
+  // 18. cleanup: hide the markers and revoke the tokens this run created
   for (const id of [memoryId, firstId, secondId].filter(Boolean)) {
     const deleted = await jsonFetch(`/api/memories/${id}`, { method: "DELETE", headers: headers() });
     if (id === memoryId) {
@@ -338,6 +420,18 @@ async function main() {
     await jsonFetch(`/api/tokens/${id}?purge=1`, { method: "DELETE", headers: headers() });
   }
   if (createdIds.length) record("cleanup: purged test tokens", true, `${createdIds.length} removed`);
+
+  // Money rows go first (soft delete), then the accounts that held them: an
+  // account may only be purged once nothing live references it.
+  for (const id of [spendTx?.id, earningTx?.id].filter(Boolean)) {
+    await jsonFetch(`/api/money/transactions/${id}`, { method: "DELETE", headers: headers() });
+  }
+  let purgedAccounts = 0;
+  for (const id of [thbAccount.body?.account?.id, usdAccount.body?.account?.id].filter(Boolean)) {
+    const gone = await jsonFetch("/api/money/accounts", { method: "DELETE", headers: headers(), body: JSON.stringify({ id }) });
+    if (gone.status === 200) purgedAccounts += 1;
+  }
+  if (purgedAccounts) record("cleanup: purged the throwaway money accounts", true, `${purgedAccounts} removed`);
 
   const failed = results.filter((r) => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed${failed.length ? `, ${failed.length} failed` : ""}\n`);

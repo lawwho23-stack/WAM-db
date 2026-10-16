@@ -14,9 +14,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           <span className="num text-[12px] tracking-[0.14em] text-ink">WAM·DB</span>
           <nav className="ml-auto flex gap-3 text-[12px] text-muted">
             <a href="/">Overview</a>
+            <a href="/money">Money</a>
             <a href="/memories">Memory</a>
             <a href="/agents">Agents</a>
-            <a href="/runs">Runs</a>
             <a href="/skills">Skills</a>
           </nav>
         </div>

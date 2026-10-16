@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { runQueuedJobs, backfillEmbeddings, decayImportance } from "@/lib/memory";
+import { refreshRatesFromFeed } from "@/lib/money";
 import { safeEqual } from "@/lib/auth-tokens";
 
 // Background jobs. Writes return fast and this drains what they queued:
-// embeddings first, then nightly decay of memories nobody has retrieved.
+// embeddings first, then nightly decay of memories nobody has retrieved, then
+// the day's exchange rates.
 //
 // Guarded by CRON_SECRET. Vercel Cron sends it as an Authorization bearer
 // header; a manual run can pass ?secret= instead.
@@ -32,10 +34,19 @@ async function run(req: Request) {
 
   try {
     const started = Date.now();
-    const result =
-      job === "embed" ? await backfillEmbeddings(limit)
-      : job === "decay" ? await decayImportance()
-      : await runQueuedJobs(limit);
+      const result =
+        job === "embed" ? await backfillEmbeddings(limit)
+        : job === "decay" ? await decayImportance()
+        : job === "rates" ? { rates: await refreshRatesFromFeed() }
+        : {
+            ...(await runQueuedJobs(limit)),
+            // The daily run also keeps the kyat and the dollar fresh. A feed
+            // that is down must not fail the memory jobs, so it is caught and
+            // reported rather than thrown.
+            rates: await refreshRatesFromFeed().catch((e) => ({
+              error: e instanceof Error ? e.message : "rate feed error",
+            })),
+          };
     return NextResponse.json({ ok: true, job, ...result, ms: Date.now() - started, at: new Date().toISOString() });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : "job error" }, { status: 500 });

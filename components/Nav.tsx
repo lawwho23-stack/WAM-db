@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 
 const LINKS = [
   { href: "/", label: "Overview", hint: "System at a glance" },
+  { href: "/money", label: "Money", hint: "Balance and spending" },
   { href: "/memories", label: "Memory", hint: "Search and edit" },
   { href: "/agents", label: "Agents", hint: "Tokens and access" },
   { href: "/runs", label: "Runs", hint: "Work log" },

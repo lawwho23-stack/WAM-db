@@ -12,6 +12,15 @@ import {
 } from "@/lib/memory";
 import { searchSkills, getSkill } from "@/lib/skills";
 import { sessionAppend, sessionGet } from "@/lib/redis";
+import {
+  accountsWithThb,
+  latestRates,
+  listAccounts,
+  listCategories,
+  listTransactions,
+  moneySummary,
+  fmt,
+} from "@/lib/money";
 import { sql } from "@/lib/db";
 
 // The one MCP door. Every agent reaches memory through this route with its own
@@ -73,6 +82,28 @@ async function scopeFor(requested?: string): Promise<string> {
 function requireWrite() {
   const me = auth();
   if (!me.canWrite) throw new Error(`Token '${me.tokenName}' is read-only (can_write = false).`);
+}
+
+function requireRead() {
+  const me = auth();
+  if (!me.canRead && !me.canWrite) throw new Error(`Token '${me.tokenName}' has no permissions.`);
+}
+
+// Money tools take names rather than ids: an agent reading "how much did I
+// spend on Food in KBZ Pay" should not need to know our primary keys.
+
+async function accountIdByName(name: string): Promise<string> {
+  const accounts = await listAccounts({ includeArchived: true });
+  const found = accounts.find((a) => a.name.toLowerCase() === name.trim().toLowerCase());
+  if (!found) throw new Error(`No account named '${name}'. Known accounts: ${accounts.map((a) => a.name).join(", ")}`);
+  return found.id;
+}
+
+async function categoryIdByName(name: string): Promise<string> {
+  const categories = await listCategories({ includeArchived: true });
+  const found = categories.find((c) => c.name.toLowerCase() === name.trim().toLowerCase());
+  if (!found) throw new Error(`No category named '${name}'. Known categories: ${categories.map((c) => c.name).join(", ")}`);
+  return found.id;
 }
 
 const mcpHandler = createMcpHandler(
@@ -280,11 +311,161 @@ const mcpHandler = createMcpHandler(
       },
       guard(async ({ command, scope }: { command: string; scope?: string }) => getSkill(await scopeFor(scope), command)),
     );
+
+    // ---------------------------------------------------------------- money
+    //
+    // Money is read-only over MCP, on purpose. An agent may look at the
+    // numbers and reason about them; only the owner, signed in through the
+    // UI, can move a figure. Two currencies are converted into baht at the
+    // rate stored on each row, so what an agent reads here is what the owner
+    // sees on the dashboard.
+
+    server.registerTool(
+      "money_summary",
+      {
+        title: "Money summary",
+        description:
+          "The owner's finances for one month, all reported in THB: net worth, money in, money out, what was kept, balances per account and the biggest categories. Read-only.",
+        annotations: { readOnlyHint: true },
+        inputSchema: z.object({
+          month: z.string().optional().describe("Month as YYYY-MM. Defaults to the current month."),
+        }),
+      },
+      guard(async ({ month }: { month?: string }) => {
+        requireRead();
+        const summary = await moneySummary(month);
+        const line =
+          `Net worth ${fmt(summary.netWorthThbMinor)} · ${summary.label}: ` +
+          `in ${fmt(summary.incomeThbMinor)}, out ${fmt(summary.expenseThbMinor)}, kept ${fmt(summary.netThbMinor)}`;
+        return [
+          line,
+          "",
+          JSON.stringify(
+            {
+              month: summary.month,
+              netWorthThbMinor: summary.netWorthThbMinor,
+              netWorthThb: fmt(summary.netWorthThbMinor),
+              incomeThbMinor: summary.incomeThbMinor,
+              expenseThbMinor: summary.expenseThbMinor,
+              netThbMinor: summary.netThbMinor,
+              transactionCount: summary.txCount,
+              byCurrency: summary.byCurrency,
+              accounts: summary.accounts.map((a) => ({
+                name: a.name,
+                currency: a.currency,
+                balanceMinor: a.balanceMinor,
+                balance: fmt(a.balanceMinor, a.currency),
+                balanceThb: fmt(a.balanceThbMinor, "THB"),
+              })),
+              topCategories: summary.byCategory.map((c) => ({
+                name: c.name,
+                kind: c.kind,
+                totalThbMinor: c.totalThbMinor,
+                totalThb: fmt(Math.abs(c.totalThbMinor), "THB"),
+                count: c.count,
+              })),
+              trend: summary.trend,
+            },
+            null,
+            2,
+          ),
+        ].join("\n");
+      }),
+    );
+
+    server.registerTool(
+      "list_transactions",
+      {
+        title: "List transactions",
+        description:
+          "Read the owner's transactions, newest first, with both the original amount and its THB value. Filter by month, a date range, account name, category name or free text. Read-only.",
+        annotations: { readOnlyHint: true },
+        inputSchema: z.object({
+          month: z.string().optional().describe("YYYY-MM — a convenience over from/to."),
+          from: z.string().optional().describe("YYYY-MM-DD, inclusive."),
+          to: z.string().optional().describe("YYYY-MM-DD, inclusive."),
+          account: z.string().optional().describe("Account name, matched ignoring case."),
+          category: z.string().optional().describe("Category name, matched ignoring case."),
+          kind: z.enum(["income", "expense"]).optional().describe("Money in, or money out."),
+          q: z.string().optional().describe("Free text over payee, note, category and account."),
+          limit: z.number().int().min(1).max(200).optional().describe("Default 50."),
+        }),
+      },
+      guard(async (args: { month?: string; from?: string; to?: string; account?: string; category?: string; kind?: "income" | "expense"; q?: string; limit?: number }) => {
+        requireRead();
+        const accountId = args.account ? await accountIdByName(args.account) : null;
+        const categoryId = args.category ? await categoryIdByName(args.category) : null;
+        const { rows, total, sumThbMinor } = await listTransactions({
+          month: args.month,
+          from: args.from,
+          to: args.to,
+          accountId,
+          categoryId,
+          kind: args.kind ?? null,
+          q: args.q ?? null,
+          limit: args.limit ?? 50,
+        });
+        return {
+          total,
+          sumThb: fmt(sumThbMinor, "THB"),
+          transactions: rows.map((row) => ({
+            id: row.id,
+            date: row.occurredOn,
+            payee: row.payee,
+            note: row.note,
+            category: row.categoryName,
+            account: row.accountName,
+            amountMinor: row.amountMinor,
+            amount: fmt(row.amountMinor, row.currency),
+            currency: row.currency,
+            rateToThb: row.rateToThb,
+            amountThbMinor: row.amountThbMinor,
+            amountThb: fmt(row.amountThbMinor, "THB"),
+            tags: row.tags,
+            source: row.source,
+          })),
+        };
+      }),
+    );
+
+    server.registerTool(
+      "list_accounts",
+      {
+        title: "List accounts",
+        description:
+          "The owner's accounts with their balances: real balance in the account's own currency and its value in THB at today's rate. Read-only.",
+        annotations: { readOnlyHint: true },
+        inputSchema: z.object({
+          includeArchived: z.boolean().optional().describe("Archived accounts are hidden unless this is true."),
+        }),
+      },
+      guard(async ({ includeArchived }: { includeArchived?: boolean }) => {
+        requireRead();
+        const [accounts, rates] = await Promise.all([accountsWithThb(), latestRates()]);
+        const active = includeArchived ? await listAccounts({ includeArchived: true }) : accounts;
+        return {
+          baseCurrency: "THB",
+          ratesToday: { USD: rates.USD?.rateToThb ?? null, MMK: rates.MMK?.rateToThb ?? null },
+          totalThb: fmt(active.reduce((sum, a) => sum + a.balanceThbMinor, 0), "THB"),
+          accounts: active.map((a) => ({
+            name: a.name,
+            kind: a.kind,
+            currency: a.currency,
+            balanceMinor: a.balanceMinor,
+            balance: fmt(a.balanceMinor, a.currency),
+            balanceThb: fmt(a.balanceThbMinor, "THB"),
+            transactions: a.txCount,
+            archived: a.archivedAt !== null,
+            note: a.note,
+          })),
+        };
+      }),
+    );
   },
   {
     serverInfo: { name: "wam-db", version: "1.0.0" },
     instructions:
-      "Whole Agent Memory. Start a task with get_context, look things up with search_memory, and save durable facts with write_memory. Use fact_key for values that change so the old row is superseded rather than duplicated.",
+      "Whole Agent Memory. Start a task with get_context, look things up with search_memory, and save durable facts with write_memory. Use fact_key for values that change so the old row is superseded rather than duplicated. The money_summary, list_transactions and list_accounts tools read the owner's finances in THB and are read-only — never promise to record a transaction.",
     verboseLogs: false,
   },
 );
