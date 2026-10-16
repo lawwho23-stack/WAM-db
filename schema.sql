@@ -227,3 +227,20 @@ CREATE TABLE knowledge_jobs (
 );
 CREATE INDEX ix_jobs_ref ON knowledge_jobs (ref_type, ref_id);
 CREATE INDEX ix_jobs_status ON knowledge_jobs (status, created_at);
+
+-- 13. API tokens = one per agent, for the MCP door. Raw token shown once,
+-- only the sha256 hash is stored. scope_id NULL = every scope in the workspace.
+CREATE TABLE api_tokens (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  workspace_id UUID NOT NULL REFERENCES workspaces(id),
+  name TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  token_prefix TEXT NOT NULL,
+  scope_id UUID REFERENCES scopes(id),
+  can_read BOOLEAN NOT NULL DEFAULT true,
+  can_write BOOLEAN NOT NULL DEFAULT true,
+  last_used_at TIMESTAMPTZ,
+  revoked_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (workspace_id, name)
+);
