@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 // Sidebar. Five destinations, no nesting — the whole app fits in one column.
@@ -14,9 +14,11 @@ const LINKS = [
   { href: "/skills", label: "Skills", hint: "Procedures" },
 ];
 
-export default function Nav() {
+export default function Nav({ email }: { email?: string }) {
   const pathname = usePathname();
+  const router = useRouter();
   const [healthy, setHealthy] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -28,6 +30,13 @@ export default function Nav() {
       alive = false;
     };
   }, []);
+
+  async function signOut() {
+    setBusy(true);
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    router.replace("/login");
+    router.refresh();
+  }
 
   const isActive = (href: string) => (href === "/" ? pathname === "/" : pathname.startsWith(href));
 
@@ -64,6 +73,18 @@ export default function Nav() {
           />
           <span>{healthy === null ? "checking…" : healthy ? "database online" : "database unreachable"}</span>
         </div>
+
+        {email ? (
+          <div className="flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-[11px] text-muted" title={email}>
+              {email}
+            </span>
+            <button className="btn px-2 py-1 text-[11px]" type="button" onClick={signOut} disabled={busy}>
+              {busy ? "…" : "Sign out"}
+            </button>
+          </div>
+        ) : null}
+
         <p className="text-[10.5px] leading-relaxed text-faint">
           Neon Postgres · pgvector · Redis
           <br />

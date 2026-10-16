@@ -1,9 +1,13 @@
 import { NextResponse } from "next/server";
 import { sql, getScope } from "@/lib/db";
+import { requireOwner } from "@/lib/owner-guard";
 
 // GET /api/runs?scope=pr-reviewer — process view list
 // POST /api/runs — create one run record per PR + SHA (dedupe by idempotency_key)
 export async function GET(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const { searchParams } = new URL(req.url);
   const scopeName = searchParams.get("scope") || "pr-reviewer";
   try {
@@ -20,6 +24,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const b = await req.json();
   if (!b.agent || !b.external_id || !b.repository)
     return NextResponse.json({ error: "agent, external_id, repository required" }, { status: 400 });

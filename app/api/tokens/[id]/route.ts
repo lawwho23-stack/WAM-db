@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { revokeToken } from "@/lib/auth-tokens";
+import { requireOwner } from "@/lib/owner-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,6 +12,9 @@ export const dynamic = "force-dynamic";
  * Purge is for test tokens and rotated keys, where the record has no value.
  */
 export async function DELETE(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const { id } = await params;
   const purge = new URL(req.url).searchParams.get("purge") === "1";
   try {

@@ -6,14 +6,33 @@
 //
 // Env:
 //   MCP_TOKEN         reuse an existing agent token (otherwise one is created)
+//   OWNER_EMAIL       owner login, read from .env.local when not set
+//   OWNER_PASSWORD    same
 //   VERCEL_BYPASS     Protection Bypass for Automation secret, for protected
 //                     deployments (x-vercel-protection-bypass header)
 //
-// Checks: health, token creation, the MCP handshake, all read/write paths,
-// hybrid search, the job runner, then cleans up after itself.
+// Checks: health, the owner gate, token creation, the MCP handshake, all
+// read/write paths, hybrid search, the job runner, then cleans up after itself.
+
+import { readFileSync } from "node:fs";
+
+// Fill in anything the environment does not already define, so a local run
+// needs no setup:  node scripts/smoke.mjs
+function loadEnvFile(path = ".env.local") {
+  try {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
+      if (match && !process.env[match[1]]) process.env[match[1]] = match[2].trim().replace(/^"(.*)"$/, "$1");
+    }
+  } catch {
+    // no .env.local here: rely on the real environment
+  }
+}
+loadEnvFile();
 
 const base = (process.argv[2] ?? "http://localhost:3000").replace(/\/$/, "");
 const bypass = process.env.VERCEL_BYPASS ?? "";
+let cookie = "";
 
 const results = [];
 function record(name, pass, detail = "") {
@@ -25,7 +44,21 @@ function record(name, pass, detail = "") {
 function headers(extra = {}) {
   const h = { "content-type": "application/json", ...extra };
   if (bypass) h["x-vercel-protection-bypass"] = bypass;
+  if (cookie) h.cookie = cookie;
   return h;
+}
+
+// Requests that deliberately carry no session cookie — used to prove the gate.
+function anonymousHeaders() {
+  const h = { "content-type": "application/json" };
+  if (bypass) h["x-vercel-protection-bypass"] = bypass;
+  return h;
+}
+
+// Our own gate answers 401. On a protected deployment without a bypass secret
+// the request is stopped one layer earlier, by Vercel, with a 302.
+function turnedAway(status) {
+  return status === 401 || (!bypass && status === 302);
 }
 
 async function jsonFetch(path, init = {}) {
@@ -90,6 +123,39 @@ async function main() {
     record("deployment gate blocks anonymous requests", gated.status !== 200, `status ${gated.status}`);
   }
 
+  // 2b. the owner gate
+  const anonymous = await fetch(`${base}/api/tokens`, { headers: anonymousHeaders() });
+  record("an API call without a session is turned away", turnedAway(anonymous.status), `status ${anonymous.status}`);
+
+  const stranger = await jsonFetch("/api/auth/login", {
+    method: "POST",
+    headers: anonymousHeaders(),
+    body: JSON.stringify({ email: "stranger@example.com", password: "not-the-passphrase" }),
+  });
+  record("another email cannot sign in", turnedAway(stranger.status), `status ${stranger.status}`);
+
+  const ownerEmail = process.env.OWNER_EMAIL;
+  const ownerPassword = process.env.OWNER_PASSWORD;
+  if (ownerEmail && ownerPassword) {
+    const res = await fetch(`${base}/api/auth/login`, {
+      method: "POST",
+      headers: anonymousHeaders(),
+      body: JSON.stringify({ email: ownerEmail, password: ownerPassword }),
+    });
+    cookie = (res.headers.getSetCookie?.() ?? []).find((c) => c.startsWith("wam_session="))?.split(";")[0] ?? "";
+    record("the owner signs in and gets a session", res.status === 200 && Boolean(cookie), cookie ? "wam_session set" : `status ${res.status}`);
+  } else {
+    record("the owner signs in and gets a session", false, "set OWNER_PASSWORD to the passphrase itself (the hash cannot sign in)");
+  }
+
+  // 2c. the gate is on the write side too, and it is checked before the body
+  const writeWithoutSession = await fetch(`${base}/api/memories`, {
+    method: "POST",
+    headers: anonymousHeaders(),
+    body: JSON.stringify({ content: "this must not be stored", scope: "laww-personal" }),
+  });
+  record("a write without a session is turned away", turnedAway(writeWithoutSession.status), `status ${writeWithoutSession.status}`);
+
   // 3. token
   if (!token) {
     const created = await jsonFetch("/api/tokens", {
@@ -112,7 +178,7 @@ async function main() {
   // 4. unauthorized call is rejected
   const noAuth = await fetch(`${base}/api/mcp`, {
     method: "POST",
-    headers: headers({ accept: "application/json, text/event-stream" }),
+    headers: anonymousHeaders(),
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "1" } } }),
   });
   record("MCP rejects a request with no token", noAuth.status === 401, `status ${noAuth.status}`);

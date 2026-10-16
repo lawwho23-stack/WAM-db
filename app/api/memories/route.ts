@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { writeMemory, listMemories } from "@/lib/memory";
+import { requireOwner } from "@/lib/owner-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,6 +17,9 @@ const WriteSchema = z.object({
 });
 
 export async function GET(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const p = new URL(req.url).searchParams;
   try {
     const out = await listMemories({
@@ -34,6 +38,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const parsed = WriteSchema.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: z.flattenError(parsed.error) }, { status: 400 });
   try {

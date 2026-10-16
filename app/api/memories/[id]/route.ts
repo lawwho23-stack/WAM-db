@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { getMemoryDetail, updateMemory, setMemoryPin, setMemoryState } from "@/lib/memory";
+import { requireOwner } from "@/lib/owner-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const { id } = await params;
   try {
     return NextResponse.json(await getMemoryDetail(id));
@@ -22,6 +26,9 @@ const PatchSchema = z.object({
 });
 
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const { id } = await params;
   const parsed = PatchSchema.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: z.flattenError(parsed.error) }, { status: 400 });
@@ -43,6 +50,9 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
 /** Soft delete. The row stays in the table with state = 'deleted'. */
 export async function DELETE(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const { id } = await params;
   try {
     return NextResponse.json(await setMemoryState(id, "deleted"));

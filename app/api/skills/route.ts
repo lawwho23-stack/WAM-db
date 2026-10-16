@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { searchSkills, upsertSkill, getSkill, revokeSkill } from "@/lib/skills";
+import { requireOwner } from "@/lib/owner-guard";
 
 // Same skill functions the MCP tools call, so the UI and agents never drift.
 
@@ -16,6 +17,9 @@ const UpsertSchema = z.object({
 });
 
 export async function GET(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const p = new URL(req.url).searchParams;
   try {
     const results = await searchSkills(p.get("scope") || "laww-personal", p.get("q") || "");
@@ -26,6 +30,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const parsed = UpsertSchema.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: z.flattenError(parsed.error) }, { status: 400 });
   try {
@@ -37,6 +44,9 @@ export async function POST(req: Request) {
 
 /** Load one skill in full (the body search_skills deliberately omits). */
 export async function PATCH(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const parsed = z
     .object({ scope: z.string().default("laww-personal"), command: z.string() })
     .safeParse(await req.json());
@@ -49,6 +59,9 @@ export async function PATCH(req: Request) {
 }
 
 export async function DELETE(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const parsed = z
     .object({ scope: z.string().default("laww-personal"), command: z.string() })
     .safeParse(await req.json());

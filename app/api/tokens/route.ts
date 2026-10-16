@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { createToken, listTokens } from "@/lib/auth-tokens";
+import { requireOwner } from "@/lib/owner-guard";
 
 // Token management for the MCP door. The raw token is returned exactly once,
 // on creation, and never again — only its hash is stored.
@@ -16,6 +17,9 @@ const CreateSchema = z.object({
 });
 
 export async function GET() {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   try {
     return NextResponse.json({ tokens: await listTokens() });
   } catch (e) {
@@ -24,6 +28,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const parsed = CreateSchema.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: z.flattenError(parsed.error) }, { status: 400 });
   try {

@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { searchMemory } from "@/lib/memory";
+import { requireOwner } from "@/lib/owner-guard";
 
 export async function GET(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const { searchParams } = new URL(req.url);
   const scope = searchParams.get("scope") || "laww-personal";
   const q = searchParams.get("q") || "";
@@ -15,6 +19,9 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const denied = await requireOwner();
+  if (denied) return denied;
+
   const body = await req.json();
   try {
     const rows = await searchMemory(body.scope || "laww-personal", body.query, 8);

@@ -32,25 +32,29 @@ A Next.js app backed by Neon Postgres that gives AI agents a durable memory with
 | Embeddings via OpenRouter (1024-dim), kept in sync with edits | Done — plus a backfill job |
 | Background jobs (embed backfill, nightly decay) | Done — `/api/cron` |
 | Universe dark UI (overview, memory, agents, runs, skills) | Done |
-| End-to-end smoke test (20 checks) | Done — `scripts/smoke.mjs` |
-| Finance module (THB base, multi-currency) | Planned — Phase 3 |
-| Owner-email login | Planned — Phase 4 |
+| End-to-end smoke test (24 checks) | Done — `scripts/smoke.mjs` |
+| Owner-email login with a signed session cookie | Done |
+| Finance module (THB base, multi-currency) | Next — Phase 3 |
 
 ---
 
 ## Architecture
 
 ```
-agent (Claude Code, Codex, bot)      browser
-        |                               |
-        |  MCP tools over HTTP          |  Next.js pages
-        v                               v
-   +---------------------------------------------+
-   |        Next.js 16 (App Router, TS)          |
-   |  /api/mcp   /api/memories   /api/search     |
-   |  /api/context   /api/runs   /api/skills     |
-   |  /api/tokens   /api/stats   /api/cron       |
-   +---------------------------------------------+
+agent (Claude Code, Codex, bot)      browser (owner)
+        |                                    |
+        |  bearer token                      |  signed session cookie
+        v                                    v
+   +--------------------------------------------------------+
+   |  proxy.ts — the front door                             |
+   |  closed unless it is /login, /api/auth/login,          |
+   |  /api/mcp, /api/cron or /api/health                    |
+   +--------------------------------------------------------+
+   |            Next.js 16 (App Router, TS)                 |
+   |  /api/auth/*    /api/mcp        /api/memories          |
+   |  /api/search    /api/context    /api/runs              |
+   |  /api/skills    /api/tokens     /api/stats  /api/cron  |
+   +--------------------------------------------------------+
                |                        |
                v                        v
    +---------------------+   +---------------------+
@@ -109,10 +113,12 @@ That is the difference between a keyword index and actual recall, and `scripts/s
 
 | Route | Method | Does |
 | --- | --- | --- |
+| `/api/auth/login` | POST | Owner sign-in — the only way to mint a session |
+| `/api/auth/logout` | POST | Clear the session cookie |
 | `/api/health` | GET | Database reachability |
 | `/api/mcp` | POST, GET, DELETE | MCP server — needs a bearer token |
 | `/api/tokens` | GET, POST | List or issue agent tokens |
-| `/api/tokens/[id]` | DELETE | Revoke a token |
+| `/api/tokens/[id]` | DELETE | Revoke a token, or `?purge=1` to remove the row |
 | `/api/stats?scope=` | GET | Counts, embedding coverage, queued jobs |
 | `/api/context?scope=` | GET | Context pack for one scope |
 | `/api/search?scope=&q=` | GET | Hybrid search (meaning + words) |
@@ -121,6 +127,8 @@ That is the difference between a keyword index and actual recall, and `scripts/s
 | `/api/skills?scope=&q=` | GET, POST, PATCH, DELETE | Find, publish, load or revoke a skill |
 | `/api/runs?scope=` | GET, POST | List or create agent runs |
 | `/api/cron` | GET, POST | Drain queued jobs — needs `CRON_SECRET` |
+
+Everything except the four public entries is owner-only. See [How access works](#how-access-works).
 
 ### MCP tools
 
@@ -142,6 +150,28 @@ Connect any MCP client:
 
 ---
 
+## How access works
+
+Three doors, three keys.
+
+| Who | Key | Reaches |
+| --- | --- | --- |
+| The owner, in a browser | Signed session cookie | Every page and every `/api/*` route except MCP and cron |
+| An agent | A bearer token (`wam_…`) | `/api/mcp` only, fenced to one scope and read or read-write |
+| Vercel Cron | `CRON_SECRET` | `/api/cron` only |
+
+**Only one email may sign in.** `OWNER_EMAIL` is the allowlist and the passphrase is checked against a scrypt hash, so the real passphrase never sits in an environment variable. A wrong email and a wrong passphrase return the same sentence, which means the response never confirms which half was right. Six failures from one address in ten minutes and that address waits.
+
+**The session is a signed cookie, not a database row.** It carries the owner email and an expiry, signed with `SESSION_SECRET`. There is no sessions table to leak, and the cookie is verified again on every request — so rotating `SESSION_SECRET` signs everyone out everywhere at once.
+
+**`proxy.ts` is the front door, and every route locks itself too.** Next renamed `middleware.ts` to `proxy.ts` in 16. Anonymous requests are turned away before they reach a handler: pages redirect to `/login` carrying a `next`, APIs get a 401. Because a matcher edit can silently remove that coverage, every private route handler also calls `requireOwner()`.
+
+**Agents cannot use the REST API at all.** Their tokens work at `/api/mcp` and nowhere else, so a leaked token cannot list tokens or write memories through a side door.
+
+**Deployment protection is a second wall, not the only one.** The Vercel project is set to Vercel Authentication for all deployments. That is why an outside agent needs the *Protection Bypass for Automation* secret as well as its token — without it the request never reaches the app.
+
+---
+
 ## Local setup
 
 ```bash
@@ -158,17 +188,29 @@ Open http://localhost:3000.
 
 ```bash
 npm run build                        # compile + type check
-node scripts/smoke.mjs               # 20 end-to-end checks against localhost:3000
+node scripts/smoke.mjs               # 24 end-to-end checks against localhost:3000
 node scripts/smoke.mjs https://wam-db.vercel.app   # or against a deployment
 ```
 
-`smoke.mjs` covers health, token issue/revoke, the MCP handshake, every read and write path, hybrid search in both directions, the scope and read-only fences, session notes, history, soft delete and the cron runner. It cleans up the memories it creates and revokes the tokens it issues. Pass `MCP_TOKEN` to reuse an existing token and `VERCEL_BYPASS` when testing a protected deployment.
+`smoke.mjs` covers health, the owner gate, token issue and purge, the MCP handshake, every read and write path, hybrid search in both directions, the scope and read-only fences, session notes, history, soft delete and the cron runner. It cleans up the memories it creates and purges the tokens it issues.
+
+It reads `.env.local` by itself, except for `OWNER_PASSWORD` — a hash cannot sign in, so pass the passphrase for that one run:
+
+```bash
+OWNER_PASSWORD='your passphrase' node scripts/smoke.mjs
+```
+
+`VERCEL_BYPASS` is needed when testing a deployment that still has Vercel Authentication on.
 
 ### Environment variables
 
 | Variable | Needed for |
 | --- | --- |
 | `DATABASE_URL` | Neon Postgres connection (pooled host) |
+| `OWNER_EMAIL` | The only email allowed to sign in |
+| `OWNER_PASSWORD_HASH` | scrypt hash of the passphrase — `node scripts/owner-password.mjs` |
+| `OWNER_PASSWORD` | Fallback if you would rather keep the plaintext |
+| `SESSION_SECRET` | Signs the session cookie, 32+ characters |
 | `OPENROUTER_API_KEY` | Embeddings and model calls |
 | `EMBED_MODEL` | Embedding model slug, 1024 dims |
 | `DECISION_MODEL` | Reviewer decision model (planned loop) |
@@ -184,6 +226,8 @@ node scripts/smoke.mjs https://wam-db.vercel.app   # or against a deployment
 ## Design decisions
 
 - **Direct to long-term.** No candidate inbox for now — memories land active, with `created_by` and a trust level so bad writes are traceable.
+- **One owner, no user table.** The only account is the owner, so an allowlist and a scrypt hash do the job that a users table would otherwise do badly.
+- **Two credential types, two doors.** A session cookie opens the interface, a bearer token opens the protocol. Neither works at the other's door.
 - **Supersede, never delete.** A changed fact keeps its old row as `superseded` history. Deletes are soft, so a mistake stays recoverable.
 - **One embedding size everywhere.** 1024 dims, so switching embedding models needs no schema change.
 - **Scopes as the permission line.** One agent token is bound to one scope, so a review bot cannot rewrite personal facts.
@@ -196,7 +240,8 @@ node scripts/smoke.mjs https://wam-db.vercel.app   # or against a deployment
 
 1. **Phase 1 — Memory e2e:** ✅ real MCP server, per-agent hashed tokens, hybrid retrieval, full memory UI, cron job runner.
 2. **Phase 2 — Universe dark UI:** ✅ design tokens, starfield shell, and every page rebuilt on it.
-3. **Phase 3 — Finance:** accounts, categories, transactions in minor units, THB base with THB/MMK/USD support, dashboard and CSV import/export.
-4. **Phase 4 — Auth and hardening:** owner-email login, deploy checks, smoke tests in CI.
+3. **Phase 3 — Owner login:** ✅ owner-email allowlist, scrypt passphrase, signed session cookie, `proxy.ts` gate plus a check inside every route.
+4. **Phase 4 — Finance:** accounts, categories and transactions in minor units, THB base with THB/MMK/USD, a dashboard and CSV import/export. Next.
+5. **Phase 5 — Hardening:** smoke tests in CI, agent-side MCP verification, deploy checks.
 
 See `docs/architecture.md` for the fuller design write-up.
