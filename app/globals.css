@@ -1,0 +1,277 @@
+@import "tailwindcss";
+
+/* ------------------------------------------------------------------ tokens */
+/* Deep space base, one accent per meaning. Keep it small and consistent:
+   cyan = memory/agents, violet = structure, mint = healthy/income,
+   rose = cost/expense, amber = attention. */
+
+@theme {
+  --color-void: #04060d;
+  --color-deep: #070b16;
+  --color-ink: #e9edf7;
+  --color-muted: #8a94ac;
+  --color-faint: #5b6480;
+  --color-line: rgba(255, 255, 255, 0.07);
+  --color-line-strong: rgba(255, 255, 255, 0.13);
+  --color-cyan: #5ee7ff;
+  --color-violet: #9b8cff;
+  --color-mint: #63f2c0;
+  --color-rose: #ff7b9c;
+  --color-amber: #ffc46b;
+
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+/* ------------------------------------------------------------------- base */
+
+/* The starfield canvas sits at -z-10, so the page background must live on
+   html only: a background on body would paint over it. */
+html {
+  background: var(--color-void);
+}
+
+body {
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-cyan) 35%, transparent);
+  color: #fff;
+}
+
+/* Scrollbars that fit the dark shell. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.16) transparent;
+}
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: content-box;
+}
+
+/* ------------------------------------------------------------- components */
+
+@layer components {
+  /* Glass panel: the main surface. */
+  .panel {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.015));
+    border: 1px solid var(--color-line);
+    border-radius: 16px;
+    backdrop-filter: blur(12px);
+  }
+
+  .panel-flat {
+    background: rgba(255, 255, 255, 0.025);
+    border: 1px solid var(--color-line);
+    border-radius: 14px;
+  }
+
+  /* Hairline that fades at both ends. */
+  .hairline {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--color-line-strong) 20%, var(--color-line-strong) 80%, transparent);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--color-line-strong);
+    background: rgba(255, 255, 255, 0.03);
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--color-muted);
+    white-space: nowrap;
+  }
+  .chip-cyan { border-color: color-mix(in oklab, var(--color-cyan) 45%, transparent); color: var(--color-cyan); }
+  .chip-violet { border-color: color-mix(in oklab, var(--color-violet) 45%, transparent); color: var(--color-violet); }
+  .chip-mint { border-color: color-mix(in oklab, var(--color-mint) 45%, transparent); color: var(--color-mint); }
+  .chip-rose { border-color: color-mix(in oklab, var(--color-rose) 45%, transparent); color: var(--color-rose); }
+  .chip-amber { border-color: color-mix(in oklab, var(--color-amber) 45%, transparent); color: var(--color-amber); }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 9px 16px;
+    border-radius: 11px;
+    border: 1px solid var(--color-line-strong);
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--color-ink);
+    font-size: 13px;
+    font-weight: 500;
+    transition: 140ms ease;
+    cursor: pointer;
+  }
+  .btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.09);
+    border-color: rgba(255, 255, 255, 0.22);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-primary {
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-cyan) 26%, transparent), color-mix(in oklab, var(--color-cyan) 12%, transparent));
+    border-color: color-mix(in oklab, var(--color-cyan) 55%, transparent);
+    color: #d8f7ff;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, color-mix(in oklab, var(--color-cyan) 38%, transparent), color-mix(in oklab, var(--color-cyan) 18%, transparent));
+  }
+
+  .btn-danger {
+    border-color: color-mix(in oklab, var(--color-rose) 45%, transparent);
+    color: #ffd3de;
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--color-rose) 16%, transparent);
+  }
+
+  .input,
+  .select,
+  .textarea {
+    width: 100%;
+    padding: 10px 13px;
+    border-radius: 11px;
+    border: 1px solid var(--color-line);
+    background: rgba(6, 9, 18, 0.75);
+    color: var(--color-ink);
+    font-size: 13px;
+    outline: none;
+    transition: 140ms ease;
+  }
+  .input::placeholder,
+  .textarea::placeholder {
+    color: var(--color-faint);
+  }
+  .input:focus,
+  .select:focus,
+  .textarea:focus {
+    border-color: color-mix(in oklab, var(--color-cyan) 50%, transparent);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-cyan) 14%, transparent);
+  }
+  .select {
+    appearance: none;
+    background-image: linear-gradient(45deg, transparent 50%, var(--color-muted) 50%), linear-gradient(135deg, var(--color-muted) 50%, transparent 50%);
+    background-position: calc(100% - 17px) 50%, calc(100% - 12px) 50%;
+    background-size: 5px 5px, 5px 5px;
+    background-repeat: no-repeat;
+    padding-right: 32px;
+  }
+  .textarea {
+    resize: vertical;
+    min-height: 92px;
+    line-height: 1.55;
+  }
+
+  /* Numbers and ids: always mono, always aligned. */
+  .num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--color-faint);
+    font-weight: 500;
+  }
+
+  /* The one loud element: a soft glow behind headings. */
+  .glow-cyan {
+    text-shadow: 0 0 26px color-mix(in oklab, var(--color-cyan) 45%, transparent);
+  }
+
+  .nav-link {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 9px 12px;
+    border-radius: 11px;
+    font-size: 13.5px;
+    color: var(--color-muted);
+    transition: 140ms ease;
+  }
+  .nav-link:hover {
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--color-ink);
+  }
+  .nav-link-active {
+    background: rgba(255, 255, 255, 0.065);
+    color: var(--color-ink);
+  }
+  .nav-link-active::before {
+    content: "";
+    position: absolute;
+    left: -1px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 17px;
+    border-radius: 999px;
+    background: var(--color-cyan);
+    box-shadow: 0 0 12px var(--color-cyan);
+  }
+}
+
+/* ------------------------------------------------------------ animations */
+
+@keyframes twinkle {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 0.75; }
+}
+
+@keyframes orbit {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes drift {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  50% { transform: translate3d(0, -14px, 0); }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-rise {
+  animation: rise 260ms ease-out both;
+}
+
+.orbit {
+  width: 15px;
+  height: 15px;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in oklab, var(--color-cyan) 25%, transparent);
+  border-top-color: var(--color-cyan);
+  animation: orbit 720ms linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .orbit { animation: none; }
+  .animate-rise { animation: none; }
+  * { scroll-behavior: auto !important; }
+}

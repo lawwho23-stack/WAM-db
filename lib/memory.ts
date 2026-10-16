@@ -29,6 +29,36 @@ export type WriteInput = {
 const RRF_K = 60;
 const LEG_SIZE = 25;
 
+/** Shape of a memory row as the UI consumes it. */
+export type MemoryRow = {
+  id: string;
+  type: string;
+  content: string;
+  snippet?: string;
+  trust: string;
+  importance: number;
+  labels: string[];
+  state: string;
+  fact_key: string | null;
+  version: number;
+  updated_at: string;
+  retrievals: number;
+  versions?: number;
+  scope_name?: string;
+  author?: string;
+  embedding_count?: number;
+  last_used_at?: string | null;
+};
+
+export type VersionRow = {
+  version: number;
+  content: string;
+  state: string;
+  reason: string | null;
+  created_at: string;
+  actor: string;
+};
+
 // ---------------------------------------------------------------- embeddings
 
 /** Embed one memory version and store the vector. Returns true on success. */
@@ -288,11 +318,11 @@ export async function getContext(scopeName: string, sessionId?: string) {
   const session = sessionId ? await sessionGet(scopeName, sessionId) : [];
   const counts = await db`SELECT state, count(*)::int AS n FROM memories WHERE scope_id = ${scope.id} GROUP BY state`;
   return {
-    scope: scope.name,
-    pinned,
-    recent,
-    session,
-    counts,
+    scope: scope.name as string,
+    pinned: pinned as unknown as MemoryRow[],
+    recent: recent as unknown as MemoryRow[],
+    session: session as unknown as string[],
+    counts: counts as unknown as { state: string; n: number }[],
     hint: "Pinned first, then recent. Session notes are short-term.",
   };
 }
@@ -343,10 +373,10 @@ export async function listMemories(f: ListFilters) {
 
   const labelRows = await db`SELECT DISTINCT unnest(labels) AS label FROM memories WHERE scope_id = ${scope.id} ORDER BY 1`;
   return {
-    scope: scope.name,
-    results: rows,
+    scope: scope.name as string,
+    results: rows as unknown as MemoryRow[],
     total: (total[0]?.n as number) ?? rows.length,
-    labels: (labelRows as { label: string }[]).map((r) => r.label),
+    labels: (labelRows as unknown as { label: string }[]).map((r) => r.label).filter(Boolean),
   };
 }
 
@@ -374,7 +404,20 @@ export async function getMemoryDetail(id: string) {
     JOIN memories m ON m.id = CASE WHEN r.from_id = ${id} THEN r.to_id ELSE r.from_id END
     WHERE (r.from_id = ${id} OR r.to_id = ${id}) AND r.status = 'active'`;
 
-  return { memory: rows[0], versions, relations };
+  return {
+    memory: rows[0] as unknown as MemoryRow,
+    versions: versions as unknown as VersionRow[],
+    relations: relations as unknown as {
+      id: string;
+      type: string;
+      origin: string;
+      status: string;
+      created_at: string;
+      outgoing: boolean;
+      other_id: string;
+      other_content: string;
+    }[],
+  };
 }
 
 export async function scopeStats(scopeName: string) {
@@ -386,16 +429,17 @@ export async function scopeStats(scopeName: string) {
     JOIN memories m ON m.id = e.memory_id WHERE m.scope_id = ${scope.id} AND m.state = 'active' AND e.model = ${embedModel()}`;
   const queued = await db`SELECT count(*)::int AS n FROM knowledge_jobs WHERE scope_id = ${scope.id} AND status IN ('queued','running')`;
   const scopes = await db`SELECT name, kind FROM scopes WHERE workspace_id = ${scope.workspace_id} ORDER BY name`;
-  const activeCount = (byState as { state: string; n: number }[]).find((r) => r.state === "active")?.n ?? 0;
+  const activeCount = (byState as unknown as { state: string; n: number }[]).find((r) => r.state === "active")?.n ?? 0;
+  const embeddedCount = (embedded[0]?.n as number) ?? 0;
   return {
-    scope: scope.name,
-    byState,
-    byType,
+    scope: scope.name as string,
+    byState: byState as unknown as { state: string; n: number }[],
+    byType: byType as unknown as { type: string; n: number }[],
     activeCount,
-    embeddedCount: (embedded[0]?.n as number) ?? 0,
-    missingEmbeddings: Math.max(activeCount - ((embedded[0]?.n as number) ?? 0), 0),
+    embeddedCount,
+    missingEmbeddings: Math.max(activeCount - embeddedCount, 0),
     queuedJobs: (queued[0]?.n as number) ?? 0,
-    scopes,
+    scopes: scopes as unknown as { name: string; kind: string }[],
   };
 }
 
