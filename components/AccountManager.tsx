@@ -177,6 +177,9 @@ export default function AccountManager({ initialAccounts }: { initialAccounts: A
               value={form.openingBalance}
               onChange={(e) => setForm({ ...form, openingBalance: e.target.value })}
             />
+            <span className="mt-1.5 block text-[11px] leading-snug text-faint">
+              What was already in this account on day one. If that same money also arrives as a transaction, leave this at 0 — otherwise it is counted twice.
+            </span>
           </label>
           <label className="md:col-span-4">
             <span className="label mb-1.5 block">Note</span>
