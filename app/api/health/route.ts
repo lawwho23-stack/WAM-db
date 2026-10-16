@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { sql } from "@/lib/db";
 
+// Without this, Next.js prerenders this route at build time and serves a
+// cached result — the health check would never touch the database.
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   try {
     const db = sql();
